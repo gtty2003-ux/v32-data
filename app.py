@@ -287,3 +287,46 @@ def main():
                 
                 health = "⚠️ 榜外"
                 if is_v32:
+                    match = v32_df[v32_df['代號'] == code]
+                    if not match.empty:
+                        health = f"{float(match.iloc[0]['總分']):.1f} 分"
+
+                display_data.append({
+                    "代號": code,
+                    "名稱": stock_name,
+                    "現價": curr_price,
+                    "成本": cost_p,
+                    "股數": qty,
+                    "損益": pl,
+                    "報酬率%": roi,
+                    "V32分數": health
+                })
+                if total > 0: p_bar.progress((i+1)/total)
+            
+            p_bar.empty()
+            
+            if display_data:
+                res_df = pd.DataFrame(display_data)
+                t_cost = (res_df['成本'] * res_df['股數']).sum()
+                t_pl = res_df['損益'].sum()
+                t_val = (res_df['現價'] * res_df['股數']).sum()
+                t_roi = (t_pl / t_cost * 100) if t_cost > 0 else 0
+                
+                c1, c2, c3 = st.columns(3)
+                c1.metric("總成本", f"${t_cost:,.0f}")
+                c2.metric("總損益", f"${t_pl:,.0f}", f"{t_roi:.2f}%")
+                c3.metric("總市值", f"${t_val:,.0f}")
+                
+                st.dataframe(
+                    res_df.style.map(color_surplus, subset=['損益', '報酬率%'])
+                    .format({
+                        "現價": "{:.2f}", "成本": "{:.2f}", "股數": "{:,.0f}",
+                        "損益": "{:+,.0f}", "報酬率%": "{:+.2f}%"
+                    }),
+                    use_container_width=True, height=400, hide_index=True
+                )
+        else:
+            st.info("目前無持股，請在上方編輯器新增資料。")
+
+if __name__ == "__main__":
+    main()
