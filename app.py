@@ -8,9 +8,9 @@ from github import Github
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
-    page_title="V32 戰情室 (Elite)",
+    page_title="V32 戰情室 (Stratified)",
     layout="wide",
-    page_icon="🎯"
+    page_icon="⚖️"
 )
 
 # --- 樣式設定 ---
@@ -27,8 +27,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 全域變數設定 ---
-# Token 請放在 Streamlit Secrets
+# --- 全域變數 ---
 REPO_KEY = "gtty2003-ux/v32-data"
 FILE_PATH = "holdings.csv"
 
@@ -55,8 +54,6 @@ def fetch_name_from_web(symbol):
 # --- 整合式股價與資訊獲取 ---
 def get_stock_info(symbol, v32_df):
     symbol_str = str(symbol)
-    
-    # 1. 查 V32 榜單
     if not v32_df.empty:
         match = v32_df[v32_df['代號'] == symbol_str]
         if not match.empty:
@@ -68,7 +65,6 @@ def get_stock_info(symbol, v32_df):
             name = str(match.iloc[0].get('名稱', match.iloc[0].get('Name', symbol_str)))
             return price, name, True
 
-    # 2. 查 Yahoo
     try:
         stock = yf.Ticker(f"{symbol_str}.TW")
         data = stock.history(period="1d")
@@ -80,7 +76,7 @@ def get_stock_info(symbol, v32_df):
     except:
         return 0, symbol_str, False
 
-# --- GitHub 存取函數 ---
+# --- GitHub 存取 ---
 def load_data_from_github():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
@@ -89,7 +85,6 @@ def load_data_from_github():
         contents = repo.get_contents(FILE_PATH)
         df = pd.read_csv(contents.download_url)
         df['股票代號'] = df['股票代號'].astype(str).str.strip()
-        
         required_cols = ["股票代號", "買入均價", "持有股數"]
         for col in required_cols:
             if col not in df.columns:
@@ -120,128 +115,130 @@ def load_v32_data():
     url = f"https://raw.githubusercontent.com/{REPO_KEY}/main/v32_recommend.csv"
     try:
         df = pd.read_csv(url)
-        
-        # 欄位標準化
         code_col = next((c for c in ['代碼', '代號', 'Code', 'Symbol'] if c in df.columns), None)
         if code_col:
             df[code_col] = df[code_col].astype(str).str.strip()
             df = df.rename(columns={code_col: '代號'})
-            
         if '總分' in df.columns:
             df['總分'] = pd.to_numeric(df['總分'], errors='coerce').fillna(0)
-            
         return df, None
     except:
         return pd.DataFrame(), "無法讀取 V32 資料"
 
-# --- 🔥 核心：V32 嚴格篩選邏輯 ---
-def filter_strict_v32(df):
+# --- 🔥 核心：分層選股策略 (Stratified Selection) ---
+def get_stratified_selection(df, count_per_bucket=5):
     """
-    執行 V32 Elite 篩選：
-    1. 總分 86 - 92
-    2. 技術分 >= 88
-    3. 量能分 >= 82
-    4. 趨勢上升 (3-5天)
+    執行 V32 分層抽樣邏輯：
+    1. 硬指標過濾 (Tech>=88, Vol>=82, Trend=Up)
+    2. 分層選取 Top N (90-92, 88-90, 86-88)
     """
-    if df.empty: return df
+    if df.empty: return df, [], []
     
-    filtered_df = df.copy()
+    # --- Step 1: 硬指標過濾 ---
+    filtered = df.copy()
     
-    # 1. 總分篩選 (86 <= 總分 <= 92)
-    if '總分' in filtered_df.columns:
-        filtered_df = filtered_df[
-            (filtered_df['總分'] >= 86) & 
-            (filtered_df['總分'] <= 92)
-        ]
-    
-    # 2. 技術分篩選 (>= 88)
-    # 嘗試尋找對應欄位 (相容不同命名)
-    tech_col = next((c for c in ['技術分', 'Tech_Score', 'Technical', 'Tech'] if c in filtered_df.columns), None)
+    # 技術分 >= 88
+    tech_col = next((c for c in ['技術分', 'Tech_Score', 'Technical', 'Tech'] if c in filtered.columns), None)
     if tech_col:
-        filtered_df[tech_col] = pd.to_numeric(filtered_df[tech_col], errors='coerce').fillna(0)
-        filtered_df = filtered_df[filtered_df[tech_col] >= 88]
-    
-    # 3. 量能分篩選 (>= 82)
-    vol_col = next((c for c in ['量能分', 'Vol_Score', 'Volume_Score', 'Volume'] if c in filtered_df.columns), None)
+        filtered[tech_col] = pd.to_numeric(filtered[tech_col], errors='coerce').fillna(0)
+        filtered = filtered[filtered[tech_col] >= 88]
+        
+    # 量能分 >= 82
+    vol_col = next((c for c in ['量能分', 'Vol_Score', 'Volume_Score', 'Volume'] if c in filtered.columns), None)
     if vol_col:
-        filtered_df[vol_col] = pd.to_numeric(filtered_df[vol_col], errors='coerce').fillna(0)
-        filtered_df = filtered_df[filtered_df[vol_col] >= 82]
-
-    # 4. 趨勢篩選 (上升中)
-    # 檢查是否有標記趨勢的欄位
-    trend_col = next((c for c in ['趨勢', 'Trend', 'Status', 'Slope'] if c in filtered_df.columns), None)
+        filtered[vol_col] = pd.to_numeric(filtered[vol_col], errors='coerce').fillna(0)
+        filtered = filtered[filtered[vol_col] >= 82]
+        
+    # 趨勢上升
+    trend_col = next((c for c in ['趨勢', 'Trend', 'Status', 'Slope'] if c in filtered.columns), None)
     if trend_col:
-        # 假設欄位內容包含 'Up', 'Rise', '1', 'True' 代表上升
-        filtered_df = filtered_df[filtered_df[trend_col].astype(str).str.contains('Up|Rise|Rising|1|True|Positive', case=False, regex=True)]
+        filtered = filtered[filtered[trend_col].astype(str).str.contains('Up|Rise|Rising|1|True|Positive', case=False, regex=True)]
+
+    # 遺失欄位警告標記
+    missing_cols = []
+    if not tech_col: missing_cols.append("技術分")
+    if not vol_col: missing_cols.append("量能分")
+
+    if filtered.empty:
+        return pd.DataFrame(), missing_cols, []
+
+    # --- Step 2: 分層選取 (Bucketing) ---
+    # 定義三個區間
+    # 區間 A: 90 <= Score <= 92
+    bucket_a = filtered[(filtered['總分'] >= 90) & (filtered['總分'] <= 92)].sort_values(by='總分', ascending=False).head(count_per_bucket)
     
-    return filtered_df, (tech_col is None), (vol_col is None)
+    # 區間 B: 88 <= Score < 90
+    bucket_b = filtered[(filtered['總分'] >= 88) & (filtered['總分'] < 90)].sort_values(by='總分', ascending=False).head(count_per_bucket)
+    
+    # 區間 C: 86 <= Score < 88
+    bucket_c = filtered[(filtered['總分'] >= 86) & (filtered['總分'] < 88)].sort_values(by='總分', ascending=False).head(count_per_bucket)
+    
+    # 合併結果 (保持順序：高 -> 低)
+    final_selection = pd.concat([bucket_a, bucket_b, bucket_c])
+    
+    # 紀錄各區間選到的數量，方便顯示
+    stats = [
+        f"90-92分: {len(bucket_a)} 檔",
+        f"88-90分: {len(bucket_b)} 檔",
+        f"86-88分: {len(bucket_c)} 檔"
+    ]
+    
+    return final_selection, missing_cols, stats
 
 # --- 主程式 ---
 def main():
-    st.title("🎯 V32 戰情室 (Elite Top 15)")
+    st.title("⚖️ V32 戰情室 (分層精選版)")
     st.caption(f"最後更新: {get_taiwan_time()}")
     
     v32_df, err = load_v32_data()
 
-    tab_scan, tab_holdings = st.tabs(["🚀 精選 Top 15", "💼 庫存管理"])
+    tab_scan, tab_holdings = st.tabs(["🚀 分層精選 Top 15", "💼 庫存管理"])
 
-    # === Tab 1: 掃描 (Top 15 精選) ===
+    # === Tab 1: 掃描 (分層邏輯) ===
     with tab_scan:
         if not v32_df.empty:
-            # 1. 執行嚴格篩選
-            elite_df, miss_tech, miss_vol = filter_strict_v32(v32_df)
+            # 1. 執行分類 (一般 vs 特殊)
+            def get_cat(row):
+                c = str(row['代號'])
+                n = str(row.get('名稱', row.get('Name', row.get('股票名稱', ''))))
+                if '債' in n or 'KY' in n or c.startswith('00') or c.startswith('91') or c[-1].isalpha() or (len(c)>4 and c.isdigit()):
+                    return 'Special'
+                return 'General'
             
-            # 2. 顯示目前的篩選狀態提示
-            status_text = "💡 篩選條件：總分 86-92"
-            if not miss_tech: status_text += " | 技術分 ≥ 88"
-            if not miss_vol: status_text += " | 量能分 ≥ 82"
-            st.info(status_text)
+            v32_df['cat'] = v32_df.apply(get_cat, axis=1)
             
-            # 警告：如果 CSV 缺欄位
-            if miss_tech or miss_vol:
-                st.warning("⚠️ 警告：CSV 缺少『技術分』或『量能分』欄位，系統僅執行總分篩選。")
+            # 2. 拆分資料集
+            df_gen_pool = v32_df[v32_df['cat']=='General']
+            df_spec_pool = v32_df[v32_df['cat']=='Special']
+            
+            # 3. 執行分層挑選
+            final_gen, miss_cols_g, stats_g = get_stratified_selection(df_gen_pool, 5)
+            final_spec, miss_cols_s, stats_s = get_stratified_selection(df_spec_pool, 5)
+            
+            # 4. 顯示警告與資訊
+            if miss_cols_g:
+                st.warning(f"⚠️ CSV 缺少欄位：{', '.join(miss_cols_g)}，無法執行完整技術/量能篩選。")
+            
+            t1, t2 = st.tabs(["🏢 一般個股 (分層)", "📊 特殊/ETF (分層)"])
+            excludes = ['Unnamed: 0', 'cat']
+            
+            with t1:
+                st.info(f"🎯 選股分佈：{' | '.join(stats_g)}")
+                if not final_gen.empty:
+                    st.dataframe(final_gen.drop(columns=excludes, errors='ignore'), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("無一般個股符合 [技術≥88, 量能≥82, 趨勢向上, 86-92分] 條件。")
 
-            if not elite_df.empty:
-                # 3. 分類 (一般 vs 特殊)
-                def get_cat(row):
-                    c = str(row['代號'])
-                    n = str(row.get('名稱', row.get('Name', row.get('股票名稱', ''))))
-                    if '債' in n or 'KY' in n or c.startswith('00') or c.startswith('91') or c[-1].isalpha() or (len(c)>4 and c.isdigit()):
-                        return 'Special'
-                    return 'General'
-                
-                elite_df['cat'] = elite_df.apply(get_cat, axis=1)
-                
-                # 4. 排序並取 Top 15
-                # 確保按總分降冪排序
-                elite_df = elite_df.sort_values(by='總分', ascending=False)
-                
-                t1, t2 = st.tabs(["🏢 精選個股 (Top 15)", "📊 精選 ETF/特殊 (Top 15)"])
-                excludes = ['Unnamed: 0', 'cat']
-                
-                with t1: 
-                    # 取前 15 名
-                    df_gen = elite_df[elite_df['cat']=='General'].head(15)
-                    if not df_gen.empty:
-                        st.dataframe(df_gen.drop(columns=excludes, errors='ignore'), use_container_width=True, hide_index=True)
-                        st.caption(f"已顯示符合條件的前 {len(df_gen)} 檔個股。")
-                    else:
-                        st.warning("沒有一般個股符合此嚴格標準。")
-                        
-                with t2: 
-                    # 取前 15 名
-                    df_spec = elite_df[elite_df['cat']=='Special'].head(15)
-                    if not df_spec.empty:
-                        st.dataframe(df_spec.drop(columns=excludes, errors='ignore'), use_container_width=True, hide_index=True)
-                        st.caption(f"已顯示符合條件的前 {len(df_spec)} 檔特殊/ETF。")
-                    else:
-                        st.warning("沒有特殊類股符合此嚴格標準。")
-            else:
-                st.error("❌ 掃描結果為空！沒有任何股票同時滿足 [86-92分 + 高技術分 + 高量能分]。")
+            with t2:
+                st.info(f"🎯 選股分佈：{' | '.join(stats_s)}")
+                if not final_spec.empty:
+                    st.dataframe(final_spec.drop(columns=excludes, errors='ignore'), use_container_width=True, hide_index=True)
+                else:
+                    st.warning("無特殊/ETF 符合條件。")
         else:
             st.warning("暫無資料，請檢查 Github v32_recommend.csv")
 
-    # === Tab 2: 庫存管理 (智慧補名版) ===
+    # === Tab 2: 庫存管理 ===
     with tab_holdings:
         st.subheader("📝 庫存編輯器")
         st.caption("輸入代號、成本與股數即可，名稱會自動帶入。")
@@ -276,7 +273,6 @@ def main():
             
             for i, row in edited_df.iterrows():
                 if not row['股票代號']: continue
-                
                 code = str(row['股票代號'])
                 cost_p = float(row['買入均價']) if pd.notnull(row['買入均價']) else 0
                 qty = float(row['持有股數']) if pd.notnull(row['持有股數']) else 0
@@ -308,7 +304,6 @@ def main():
                     "V32分數": health
                 })
                 if total > 0: p_bar.progress((i+1)/total)
-            
             p_bar.empty()
             
             if display_data:
