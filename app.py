@@ -168,3 +168,83 @@ def main():
                 
                 # 抓價
                 curr_price, is_v32 = get_current_price(code, v32_df)
+                
+                # 損益計算邏輯修正：若現價為 0，則不計算虧損
+                if curr_price > 0:
+                    cost_total = cost_p * qty
+                    mv_total = curr_price * qty
+                    pl = mv_total - cost_total
+                    roi = (pl / cost_total * 100) if cost_total > 0 else 0
+                else:
+                    # 現價為 0 (抓不到數據)，將損益歸零，避免顯示 -100%
+                    cost_total = cost_p * qty
+                    mv_total = 0 
+                    pl = 0 
+                    roi = 0
+                
+                # V32 健康度
+                health = "⚠️ 榜外"
+                if is_v32 and not v32_df.empty:
+                    match = v32_df[v32_df['代號'] == code]
+                    if not match.empty:
+                        health = f"{float(match.iloc[0]['總分']):.1f} 分"
+                
+                display_data.append({
+                    "代號": code,
+                    "名稱": item['股票名稱'],
+                    "現價": curr_price,
+                    "成本": cost_p,
+                    "股數": qty,
+                    "損益": pl,
+                    "報酬率%": roi,
+                    "V32分數": health
+                })
+                p_bar.progress((i + 1) / total_items)
+            
+            p_bar.empty()
+            
+            # 總覽
+            st.subheader("📊 資產總覽 (模擬)")
+            df_res = pd.DataFrame(display_data)
+            
+            # 計算總合時，要注意現價為 0 的項目不應計入「錯誤的虧損」，但市值會少算
+            # 這裡維持簡單加總，但因為上面已經把 PL 設為 0，所以總損益不會莫名大虧
+            t_cost = (df_res['成本'] * df_res['股數']).sum()
+            t_val = (df_res['現價'] * df_res['股數']).sum()
+            
+            # 修正總損益顯示：只計算有抓到價格的股票的損益，或者是簡單加總 (因上面已歸零，加總即為 0)
+            t_pl = df_res['損益'].sum()
+            t_roi = (t_pl / t_cost * 100) if t_cost > 0 else 0
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("總市值", f"${t_val:,.0f}")
+            c2.metric("總成本", f"${t_cost:,.0f}")
+            c3.metric("總損益", f"${t_pl:,.0f}", f"{t_roi:.2f}%")
+            
+            # 明細表
+            st.subheader("📋 持股明細")
+            
+            if st.button("🗑️ 清空試算資料"):
+                st.session_state['holdings'] = []
+                st.rerun()
+
+            st.dataframe(
+                df_res.style.map(color_surplus, subset=['損益', '報酬率%'])
+                .format({
+                    "現價": "{:.2f}",
+                    "成本": "{:.2f}",
+                    "股數": "{:,.0f}",
+                    "損益": "{:+,.0f}",
+                    "報酬率%": "{:+.2f}%"
+                }),
+                use_container_width=True,
+                height=500,
+                hide_index=True
+            )
+            st.caption("🔴 紅色：獲利 | 🟢 綠色：虧損 | ⚠️ 若現價為 0.00，表示暫時無法取得數據，損益將顯示為 0。")
+            
+        else:
+            st.info("目前無持股資料，請在上方輸入加入。")
+
+if __name__ == "__main__":
+    main()
