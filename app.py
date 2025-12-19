@@ -266,4 +266,159 @@ def load_holdings():
             if c not in df.columns: df[c] = 0 if c != "股票代號" else ""
         return df[["股票代號", "買入均價", "持有股數"]]
     except:
-        return pd.DataFrame(columns=["
+        return pd.DataFrame(columns=["股票代號", "買入均價", "持有股數"])
+
+def save_holdings(df):
+    try:
+        token = st.secrets["general"]["GITHUB_TOKEN"]
+        g = Github(token)
+        repo = g.get_repo(REPO_KEY)
+        csv_content = df.to_csv(index=False)
+        try:
+            contents = repo.get_contents(FILE_PATH)
+            repo.update_file(contents.path, f"Update {get_taiwan_time()}", csv_content, contents.sha)
+            st.success("✅ 儲存成功！")
+        except:
+            repo.create_file(FILE_PATH, "Create holdings.csv", csv_content)
+            st.success("✅ 建立並儲存成功！")
+    except Exception as e:
+        st.error(f"❌ 儲存失敗: {e}")
+
+# --- 篩選邏輯 ---
+
+def get_stratified_selection(df):
+    """分層精選邏輯 (Strict)"""
+    if df.empty: return df, []
+    
+    # 1. 硬指標
+    mask = (df['技術分'] >= 88) & (df['量能分'] >= 82) & (df['趨勢'] == 'Rising') & (df['總分'] >= 86) & (df['總分'] <= 92)
+    filtered = df[mask].copy()
+    
+    if filtered.empty: return pd.DataFrame(), ["無符合硬指標標的"]
+    
+    # 2. 分層 (Bucketing)
+    b_a = filtered[(filtered['總分'] >= 90) & (filtered['總分'] <= 92)].sort_values('總分', ascending=False).head(5)
+    b_b = filtered[(filtered['總分'] >= 88) & (filtered['總分'] < 90)].sort_values('總分', ascending=False).head(5)
+    b_c = filtered[(filtered['總分'] >= 86) & (filtered['總分'] < 88)].sort_values('總分', ascending=False).head(5)
+    
+    final = pd.concat([b_a, b_b, b_c])
+    stats = [f"90-92: {len(b_a)}", f"88-90: {len(b_b)}", f"86-88: {len(b_c)}"]
+    return final, stats
+
+def get_raw_top10(df):
+    """原始分數 Top 10 (Raw Logic)"""
+    if df.empty: return df
+    return df.sort_values(by='總分', ascending=False).head(10)
+
+# --- 主程式 ---
+def main():
+    st.title("🔥 V32 戰情室 (Slope Logic)")
+    st.caption(f"最後更新: {get_taiwan_time()}")
+    
+    v32_df, err = load_and_process_data()
+    
+    tab_strat, tab_raw, tab_inv = st.tabs(["🎯 分層精選 Top 15", "🏆 原始分數 Top 10", "💼 庫存管理"])
+    
+    if not v32_df.empty:
+        v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱')) or 'KY' in str(r.get('名稱')) or str(r['代號']).startswith(('00','91')) or str(r['代號'])[-1].isalpha() or (len(str(r['代號']))>4 and str(r['代號']).isdigit())) else 'General', axis=1)
+
+    fmt_score = {'收盤':'{:.2f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '總分':'{:.1f}'}
+
+    # === Tab 1: 分層精選 (Stratified) ===
+    with tab_strat:
+        if err: st.error(err)
+        if not v32_df.empty:
+            gen, stats_g = get_stratified_selection(v32_df[v32_df['cat']=='General'])
+            spec, stats_s = get_stratified_selection(v32_df[v32_df['cat']=='Special'])
+            
+            t1, t2 = st.tabs(["🏢 一般個股", "📊 特殊/ETF"])
+            with t1:
+                st.info(f"分佈：{' | '.join(stats_g)}")
+                if not gen.empty: st.dataframe(gen[['代號','名稱','收盤','技術分','量能分','總分','趨勢']].style.format(fmt_score), hide_index=True, use_container_width=True)
+                else: st.warning("無符合條件標的")
+            with t2:
+                st.info(f"分佈：{' | '.join(stats_s)}")
+                if not spec.empty: st.dataframe(spec[['代號','名稱','收盤','技術分','量能分','總分','趨勢']].style.format(fmt_score), hide_index=True, use_container_width=True)
+                else: st.warning("無符合條件標的")
+        else: st.warning("暫無資料")
+
+    # === Tab 2: 原始 Top 10 (Raw) ===
+    with tab_raw:
+        st.markdown("### 🏆 全市場原始分數霸榜 (Top 10)")
+        if not v32_df.empty:
+            raw_gen = get_raw_top10(v32_df[v32_df['cat']=='General'])
+            raw_spec = get_raw_top10(v32_df[v32_df['cat']=='Special'])
+            
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("🏢 一般個股")
+                if not raw_gen.empty:
+                    # 使用普通的 dataframe 顯示，避免 matplotlib 依賴報錯
+                    st.dataframe(raw_gen[['代號','名稱','收盤','總分','技術分','量能分']].style.format(fmt_score), hide_index=True, use_container_width=True)
+            with c2:
+                st.subheader("📊 特殊/ETF")
+                if not raw_spec.empty:
+                    st.dataframe(raw_spec[['代號','名稱','收盤','總分','技術分','量能分']].style.format(fmt_score), hide_index=True, use_container_width=True)
+        else:
+            st.warning("暫無資料")
+
+    # === Tab 3: 庫存管理 ===
+    with tab_inv:
+        st.subheader("📝 庫存編輯器")
+        if 'editor_data' not in st.session_state:
+            st.session_state['editor_data'] = load_holdings()
+            
+        edited = st.data_editor(
+            st.session_state['editor_data'],
+            num_rows="dynamic",
+            use_container_width=True,
+            column_config={
+                "股票代號": st.column_config.TextColumn("代號", required=True),
+                "買入均價": st.column_config.NumberColumn("均價", format="%.2f"),
+                "持有股數": st.column_config.NumberColumn("股數", step=1000)
+            }, key="inv_editor"
+        )
+        if st.button("💾 儲存變更"):
+            save_holdings(edited)
+            st.rerun()
+            
+        st.divider()
+        if not edited.empty and not v32_df.empty:
+            res = []
+            for _, r in edited.iterrows():
+                if not r['股票代號']: continue
+                code = str(r['股票代號'])
+                qty = float(r['持有股數'] or 0)
+                cost = float(r['買入均價'] or 0)
+                
+                match = v32_df[v32_df['代號']==code]
+                if not match.empty:
+                    curr = match.iloc[0]['收盤']
+                    nm = match.iloc[0]['名稱']
+                    sc = match.iloc[0]['總分']
+                else:
+                    try:
+                        t = yf.Ticker(f"{code}.TW")
+                        h = t.history(period='1d')
+                        curr = h['Close'].iloc[-1] if not h.empty else 0
+                        nm = code; sc = 0
+                    except: curr=0; nm=code; sc=0
+                
+                val = curr * qty
+                c_tot = cost * qty
+                pl = val - c_tot
+                roi = (pl/c_tot*100) if c_tot>0 else 0
+                
+                res.append({'代號':code, '名稱':nm, '現價':curr, '成本':cost, '股數':qty, '損益':pl, '報酬率%':roi, 'V32分': f"{sc:.1f}" if sc>0 else "榜外"})
+            
+            if res:
+                df_res = pd.DataFrame(res)
+                c1, c2, c3 = st.columns(3)
+                c1.metric("總成本", f"${(df_res['成本']*df_res['股數']).sum():,.0f}")
+                c2.metric("總損益", f"${df_res['損益'].sum():,.0f}")
+                c3.metric("總市值", f"${(df_res['現價']*df_res['股數']).sum():,.0f}")
+                
+                st.dataframe(df_res.style.map(color_surplus, subset=['損益','報酬率%']).format({'現價':'{:.2f}','損益':'{:+,.0f}','報酬率%':'{:+.2f}%'}), use_container_width=True, hide_index=True)
+
+if __name__ == "__main__":
+    main()
