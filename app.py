@@ -14,7 +14,6 @@ st.set_page_config(
 # --- 樣式設定 ---
 st.markdown("""
     <style>
-    /* 表頭顏色設定為淺綠色 */
     .stDataFrame thead tr th {
         background-color: #C8E6C9 !important;
         color: #000000 !important;
@@ -46,11 +45,12 @@ def load_data():
         if '總分' in df.columns:
             df['總分'] = pd.to_numeric(df['總分'], errors='coerce').fillna(0)
         
-        # 2. 尋找關鍵欄位
+        # 2. 尋找關鍵欄位 (包含 '代碼')
         code_col = None
         name_col = None
         
-        for c in ['代號', 'Code', 'Symbol', '股票代號']:
+        possible_code_cols = ['代碼', '代號', 'Code', 'Symbol', '股票代號']
+        for c in possible_code_cols:
             if c in df.columns:
                 code_col = c
                 break
@@ -60,50 +60,50 @@ def load_data():
                 name_col = n
                 break
                 
-        # 3. 建立分類標籤
+        # 3. 執行分類
         if code_col:
-            df[code_col] = df[code_col].astype(str)
+            df[code_col] = df[code_col].astype(str).str.strip()
             df['temp_name'] = df[name_col].astype(str) if name_col else ""
             
             def classify_stock(row):
                 code = row[code_col]
                 name = row['temp_name']
                 
-                # (1) 債券類型: 名稱含"債" (如美債, 公司債)
-                if '債' in name:
-                    return 'Special'
+                # --- (1) 關鍵字過濾 ---
+                # 排除債券相關 (美債、公司債)
+                if '債' in name: return 'Special'
+                # 排除 KY 股 (外國企業)
+                if 'KY' in name: return 'Special'
+
+                # --- (2) 代號前綴過濾 ---
+                # ETF (00開頭)
+                if code.startswith('00'): return 'Special'
+                # DR 存託憑證 (91開頭)
+                if code.startswith('91'): return 'Special'
                 
-                # (2) ETF: 00 開頭
-                if code.startswith('00'):
-                    return 'Special'
-                
-                # (3) TDR: 91 開頭
-                if code.startswith('91'):
-                    return 'Special'
-                
-                # (4) 特別股/債券ETF: 代號含有字母 (如 2881A, 00679B)
+                # --- (3) 代號後綴過濾 (通殺規則) ---
+                # 檢查最後一個字是否為英文字母
+                # 這條規則會抓到：
+                # - 特別股: A, B, C, I (如 2881B, 2887I)
+                # - 槓桿型 ETF: L (如 00631L)
+                # - 反向型 ETF: R (如 00632R)
+                # - 債券型 ETF: B (如 00679B)
+                # - 期貨型 ETF: U (如 00635U)
                 if code[-1].isalpha(): 
                     return 'Special'
                 
-                # (5) 特別股: 名稱含 "特"
-                if '特' in name:
+                # --- (4) 其他長度檢查 ---
+                # 一般個股為 4 碼數字，若超過且全是數字，通常是權證或特殊商品
+                if len(code) > 4 and code.isdigit():
                     return 'Special'
-                    
-                # (6) 外國企業: 名稱含 KY
-                if 'KY' in name:
-                    return 'Special'
-                
-                # (7) 若代號長度 > 4 且非 ETF，通常是可轉債或權證
-                # (但保留一些可能的例外，先以名稱過濾為主)
-                if len(code) > 4 and not code.startswith('00'):
-                     return 'Special'
 
-                # 剩下的就是純一般個股
+                # 剩下的才是「純一般個股」
                 return 'General'
 
             df['category'] = df.apply(classify_stock, axis=1)
             df = df.drop(columns=['temp_name'])
         else:
+            st.error("警告：找不到股票代號欄位，無法進行過濾。")
             df['category'] = 'General'
             
         return df, None
@@ -130,7 +130,7 @@ def main():
             df_special = df[df['category'] == 'Special'].copy() 
             
             # 建立子分頁
-            sub_tab1, sub_tab2 = st.tabs(["🏢 一般個股 Top 10", "📊 ETF/債券/其他 Top 10"])
+            sub_tab1, sub_tab2 = st.tabs(["🏢 一般個股 Top 10", "📊 特殊/ETF Top 10"])
             
             cols_to_hide = ['Unnamed: 0', 'category']
             
@@ -146,11 +146,11 @@ def main():
                         use_container_width=True,
                         hide_index=True
                     )
-                    st.caption(f"✅ 純一般個股 (排除 ETF、債券、KY、特別股)。共 {len(df_general)} 檔。")
+                    st.caption(f"✅ 純一般個股。排除：ETF, KY, DR(91), 特別股(A/B/C), 槓桿/反向(L/R)。共 {len(df_general)} 檔。")
                 else:
                     st.info("無符合的一般個股。")
 
-            # --- 表格 2: 非一般 ---
+            # --- 表格 2: 特殊/ETF ---
             with sub_tab2:
                 if not df_special.empty:
                     display_spec = df_special.head(10)
@@ -162,7 +162,7 @@ def main():
                         use_container_width=True,
                         hide_index=True
                     )
-                    st.caption(f"📋 包含：ETF、債券、KY股、特別股、TDR。共 {len(df_special)} 檔。")
+                    st.caption(f"📋 特殊類別。包含：ETF (含 L/R/B/U), KY股, 特別股, DR存託憑證。共 {len(df_special)} 檔。")
                 else:
                     st.info("無符合的特殊類股。")
 
