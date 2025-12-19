@@ -19,7 +19,6 @@ st.markdown("""
         background-color: #C8E6C9 !important;
         color: #000000 !important;
     }
-    /* 調整指標數值大小 */
     div[data-testid="stMetricValue"] {
         font-size: 20px;
     }
@@ -47,60 +46,64 @@ def load_data():
         if '總分' in df.columns:
             df['總分'] = pd.to_numeric(df['總分'], errors='coerce').fillna(0)
         
-        # 2. 尋找關鍵欄位 (代號 & 名稱)
+        # 2. 尋找關鍵欄位
         code_col = None
         name_col = None
         
-        # 找代號欄位
         for c in ['代號', 'Code', 'Symbol', '股票代號']:
             if c in df.columns:
                 code_col = c
                 break
         
-        # 找名稱欄位 (用於判斷 KY 或 特別股)
         for n in ['名稱', 'Name', '股票名稱']:
             if n in df.columns:
                 name_col = n
                 break
                 
         # 3. 建立分類標籤
-        # category: 'General' (一般個股), 'Special' (非一般: ETF/KY/特/TDR)
         if code_col:
             df[code_col] = df[code_col].astype(str)
-            # 如果沒有名稱欄位，就給空字串避免報錯，但會影響 KY 判斷
             df['temp_name'] = df[name_col].astype(str) if name_col else ""
             
             def classify_stock(row):
                 code = row[code_col]
                 name = row['temp_name']
                 
-                # (1) ETF: 00 開頭
+                # (1) 債券類型: 名稱含"債" (如美債, 公司債)
+                if '債' in name:
+                    return 'Special'
+                
+                # (2) ETF: 00 開頭
                 if code.startswith('00'):
                     return 'Special'
                 
-                # (2) TDR: 91 開頭
+                # (3) TDR: 91 開頭
                 if code.startswith('91'):
                     return 'Special'
                 
-                # (3) 特別股: 代號含有字母 (如 2881A) 或 名稱含 "特"
-                # 檢查最後一位是否為字母 (Python 的 isalpha())
+                # (4) 特別股/債券ETF: 代號含有字母 (如 2881A, 00679B)
                 if code[-1].isalpha(): 
                     return 'Special'
+                
+                # (5) 特別股: 名稱含 "特"
                 if '特' in name:
                     return 'Special'
                     
-                # (4) 外國企業: 名稱含 KY
+                # (6) 外國企業: 名稱含 KY
                 if 'KY' in name:
                     return 'Special'
                 
-                # 剩下的就是一般個股
+                # (7) 若代號長度 > 4 且非 ETF，通常是可轉債或權證
+                # (但保留一些可能的例外，先以名稱過濾為主)
+                if len(code) > 4 and not code.startswith('00'):
+                     return 'Special'
+
+                # 剩下的就是純一般個股
                 return 'General'
 
             df['category'] = df.apply(classify_stock, axis=1)
-            # 刪除暫存欄位
             df = df.drop(columns=['temp_name'])
         else:
-            # 找不到代號欄位，無法分類，全部當作一般
             df['category'] = 'General'
             
         return df, None
@@ -123,11 +126,11 @@ def main():
             st.warning("目前沒有符合 V32 標準的標的。")
         else:
             # 拆分資料
-            df_general = df[df['category'] == 'General'].copy() # 一般個股
-            df_special = df[df['category'] == 'Special'].copy() # 非一般 (ETF/KY/特/TDR)
+            df_general = df[df['category'] == 'General'].copy() 
+            df_special = df[df['category'] == 'Special'].copy() 
             
             # 建立子分頁
-            sub_tab1, sub_tab2 = st.tabs(["🏢 一般個股 Top 10", "📊 ETF與其他 Top 10"])
+            sub_tab1, sub_tab2 = st.tabs(["🏢 一般個股 Top 10", "📊 ETF/債券/其他 Top 10"])
             
             cols_to_hide = ['Unnamed: 0', 'category']
             
@@ -143,11 +146,11 @@ def main():
                         use_container_width=True,
                         hide_index=True
                     )
-                    st.caption(f"包含：純台資企業普通股 (排除 KY/TDR/特別股)。共 {len(df_general)} 檔。")
+                    st.caption(f"✅ 純一般個股 (排除 ETF、債券、KY、特別股)。共 {len(df_general)} 檔。")
                 else:
                     st.info("無符合的一般個股。")
 
-            # --- 表格 2: 非一般 (ETF/KY/特/TDR) ---
+            # --- 表格 2: 非一般 ---
             with sub_tab2:
                 if not df_special.empty:
                     display_spec = df_special.head(10)
@@ -159,7 +162,7 @@ def main():
                         use_container_width=True,
                         hide_index=True
                     )
-                    st.caption(f"包含：ETF (00)、外國企業 (KY)、特別股、存託憑證 (91)。共 {len(df_special)} 檔。")
+                    st.caption(f"📋 包含：ETF、債券、KY股、特別股、TDR。共 {len(df_special)} 檔。")
                 else:
                     st.info("無符合的特殊類股。")
 
