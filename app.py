@@ -51,11 +51,14 @@ def color_stability(val):
     3/5, 4/5, 5/5 -> 穩定 (綠色)
     """
     if not isinstance(val, str): return ''
-    score = int(val.split('/')[0])
-    if score <= 2:
-        return 'color: #E65100; font-weight: bold;' # 橘色：注意風險，可能是假突破
-    elif score >= 3:
-        return 'color: #2E7D32; font-weight: bold;' # 綠色：結構紮實
+    try:
+        score = int(val.split('/')[0])
+        if score <= 2:
+            return 'color: #E65100; font-weight: bold;' # 橘色
+        elif score >= 3:
+            return 'color: #2E7D32; font-weight: bold;' # 綠色
+    except:
+        pass
     return ''
 
 @st.cache_data(ttl=86400)
@@ -66,18 +69,18 @@ def fetch_name_from_web(symbol):
     except:
         return symbol
 
-# --- 核心：V32 技術指標運算 (B + C 進化版) ---
+# --- 核心：V32 技術指標運算 (B + C 進化版 - 安全修正) ---
 def calculate_indicators(hist):
-    # 需要至少 65 天資料才能確保 MA60 和回溯運算不出錯
-    if len(hist) < 65: return 0, 0, "Data Insufficient", "0/5"
+    # 防呆：資料長度不足者直接回傳 0，避免數學運算錯誤
+    if len(hist) < 65: return 0, 0, 0, "0/5"
 
-    # 1. 預先計算所有指標 (向量化運算，一次算完)
+    # 1. 預先計算所有指標 (向量化運算)
     close = hist['Close']
     vol = hist['Volume']
     high = hist['High']
     open_p = hist['Open']
     
-    # 均線
+    # 均線 (使用 rolling，若資料中有 NaN 則結果也會是 NaN)
     ma5_s = close.rolling(5).mean()
     ma20_s = close.rolling(20).mean()
     ma60_s = close.rolling(60).mean()
@@ -103,26 +106,22 @@ def calculate_indicators(hist):
     high_20_s = high.rolling(20).max()
 
     # ---------------------------------------------------------
-    # 迴圈回溯：計算過去 7 天的「原始分數」
-    # 用途：為了執行 B (Smoothing) 和 C (Stability)
+    # 2. 迴圈回溯：計算過去 7 天的「原始分數」
     # ---------------------------------------------------------
     raw_scores = [] 
-    
-    # 取最後 7 天的 index 位置 (例如: -7, -6, ... -1)
-    # 為什麼要 7 天？因為要算 Smoothing 需要前一天，要算 Stability 需要前 5 天
-    lookback_indices = range(-7, 0) 
+    lookback_indices = range(-7, 0) # 回溯過去7天
 
     for i in lookback_indices:
-        # 在第 i 天的當下數據
+        # 取值時使用 iloc
         c_now = close.iloc[i]
         ma5 = ma5_s.iloc[i]
         ma20 = ma20_s.iloc[i]
-        ma20_prev = ma20_s.iloc[i-1] # 當時的前一天
+        ma20_prev = ma20_s.iloc[i-1] 
         ma60 = ma60_s.iloc[i]
         rsi_now = rsi_s.iloc[i]
         macd_now = macd_s.iloc[i]
         sig_now = signal_s.iloc[i]
-        high_20_prev = high_20_s.iloc[i-1] # 突破前一日的20日高
+        high_20_prev = high_20_s.iloc[i-1] 
         
         v_now = vol.iloc[i]
         v_prev = vol.iloc[i-1]
@@ -130,63 +129,59 @@ def calculate_indicators(hist):
         v_ma5 = vol_ma5_s.iloc[i]
         o_now = open_p.iloc[i]
 
+        # 為了防止 NaN 導致的比對錯誤，這裡做簡單的 NaN 檢查
+        # 如果關鍵指標是 NaN，條件就不會成立 (視為 False)
+        
         # --- A. 技術分 (Technical) ---
         t_score = 60
-        if c_now > ma20: t_score += 5         # 站上月線
-        if ma20 > ma20_prev: t_score += 5     # 月線翻揚
-        if ma5 > ma20 and ma20 > ma60: t_score += 10 # 多頭排列
+        if not np.isnan(ma20) and c_now > ma20: t_score += 5         
+        if not np.isnan(ma20) and not np.isnan(ma20_prev) and ma20 > ma20_prev: t_score += 5     
+        if not np.isnan(ma5) and not np.isnan(ma20) and not np.isnan(ma60):
+            if ma5 > ma20 and ma20 > ma60: t_score += 10 
         
-        if rsi_now > 50: t_score += 5         # RSI 強勢
-        if rsi_now > 70: t_score += 5         # RSI 過熱區 (強勢特徵)
-        if macd_now > sig_now: t_score += 5   # MACD 金叉
-        
-        if c_now > high_20_prev: t_score += 10 # 突破 20 日新高
+        if not np.isnan(rsi_now) and rsi_now > 50: t_score += 5         
+        if not np.isnan(rsi_now) and rsi_now > 70: t_score += 5         
+        if not np.isnan(macd_now) and not np.isnan(sig_now) and macd_now > sig_now: t_score += 5   
+        if not np.isnan(high_20_prev) and c_now > high_20_prev: t_score += 10 
 
         # --- B. 量能分 (Volume) ---
         v_score = 60
-        if v_now > v_ma20: v_score += 10      # 大於月均量
-        if v_now > v_ma5: v_score += 10       # 大於週均量
+        if not np.isnan(v_ma20) and v_now > v_ma20: v_score += 10      
+        if not np.isnan(v_ma5) and v_now > v_ma5: v_score += 10       
         
         is_red = c_now > o_now
         vol_increase = v_now > v_prev
-        if is_red and vol_increase: v_score += 15 # 價漲量增
+        if is_red and vol_increase: v_score += 15 
         
-        if v_now > v_ma20 * 1.5: v_score += 5 # 放量 1.5 倍
+        if not np.isnan(v_ma20) and v_now > v_ma20 * 1.5: v_score += 5 
 
-        # 上限與加權
+        # 上限
         t_score = min(100, t_score)
         v_score = min(100, v_score)
         
-        # 算出「當日原始總分」
         daily_total = (t_score * 0.7) + (v_score * 0.3)
         raw_scores.append(daily_total)
 
-    # ---------------------------------------------------------
     # 3. 模組實裝
-    # ---------------------------------------------------------
+    # 確保 raw_scores 裡沒有 NaN，若有則視為 0
+    raw_scores = [0 if np.isnan(x) else x for x in raw_scores]
     
-    # 取得今日與昨日的原始分 (list 的最後兩個)
+    if len(raw_scores) < 2: return 0, 0, 0, "0/5" # 再次防呆
+
     raw_today = raw_scores[-1]
     raw_yesterday = raw_scores[-2]
 
-    # [模組 B] 連續化分數 (Smoothing)
-    # 70% 看今天，30% 看昨天的慣性
+    # [模組 B]
     final_v32_score = (raw_today * 0.7) + (raw_yesterday * 0.3)
 
-    # [模組 C] 穩定度 (Stability)
-    # 檢查過去 5 天 (含今天)，有幾天原始分 > 70
-    # list slicing: raw_scores[-5:] 取最後 5 筆
+    # [模組 C]
     last_5_days = raw_scores[-5:]
     stability_count = sum(1 for s in last_5_days if s >= 70)
     stability_str = f"{stability_count}/5"
 
-    # 趨勢標記 (沿用舊邏輯，僅供參考)
-    trend = "Rising" if (close.iloc[-1] > ma5_s.iloc[-1] and ma5_s.iloc[-1] > ma20_s.iloc[-1]) else "Consolidating"
-    
-    # 回傳：技術分(今日), 量能分(今日), V32總分(B模組), 穩定度(C模組)
     return t_score, v_score, final_v32_score, stability_str
 
-# --- 批次運算引擎 ---
+# --- 批次運算引擎 (修改版：直接剔除資料不足者) ---
 @st.cache_data(ttl=3600)
 def run_v32_engine(ticker_list):
     results = []
@@ -203,27 +198,30 @@ def run_v32_engine(ticker_list):
         
         try:
             stock = yf.Ticker(f"{symbol}.TW")
-            # 抓取 3 個月資料以確保有足夠的歷史做回溯計算
+            # 抓取 3 個月資料
             hist = stock.history(period="3mo")
             
-            if not hist.empty:
-                # 呼叫新的指標計算函數
-                t_s, v_s, final_s, stab = calculate_indicators(hist)
+            # 🔥【關鍵修改】資料不足 65 天者，直接剔除 (continue)
+            # 這是最根本解決 TypeError 的方法
+            if len(hist) < 65:
+                continue 
+            
+            # 資料充足才進行運算
+            t_s, v_s, final_s, stab = calculate_indicators(hist)
+            
+            results.append({
+                '代號': symbol, '名稱': name,
+                '收盤': hist['Close'].iloc[-1],
+                '成交量': hist['Volume'].iloc[-1],
+                '技術分': t_s,   
+                '量能分': v_s,   
+                'V32總分': final_s,
+                '穩定度': stab   
+            })
                 
-                results.append({
-                    '代號': symbol, '名稱': name,
-                    '收盤': hist['Close'].iloc[-1],
-                    '成交量': hist['Volume'].iloc[-1],
-                    '技術分': t_s,   # 顯示用 (今日)
-                    '量能分': v_s,   # 顯示用 (今日)
-                    'V32總分': final_s, # 排序用 (B模組結果)
-                    '穩定度': stab   # 決策用 (C模組結果)
-                })
-            else:
-                # 沒資料的處理
-                pass
-        except:
-            pass
+        except Exception as e:
+            # 遇到任何抓取錯誤也直接跳過
+            continue
             
     p_bar.empty()
     status.empty()
@@ -245,7 +243,7 @@ def load_and_process_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-# --- GitHub 庫存存取 (維持原樣) ---
+# --- GitHub 庫存存取 ---
 def load_holdings():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
@@ -281,9 +279,14 @@ def get_stratified_selection(df):
     """分層精選邏輯"""
     if df.empty: return df, []
     
-    # 核心過濾：使用「V32總分」(B模組) 而非舊總分
-    # 門檻：V32總分 >= 86, 且穩定度不能太差 (這裡暫不強制過濾穩定度，讓使用者自己看)
-    # 技術分與量能分維持一定的基礎門檻
+    # 【新增防呆】確保這三個欄位絕對是數字，無法轉換的變成 NaN 再補 0
+    # 這是防止 TypeError 的第二道防線
+    df['V32總分'] = pd.to_numeric(df['V32總分'], errors='coerce').fillna(0)
+    df['技術分'] = pd.to_numeric(df['技術分'], errors='coerce').fillna(0)
+    df['量能分'] = pd.to_numeric(df['量能分'], errors='coerce').fillna(0)
+
+    # 核心過濾：使用「V32總分」(B模組)
+    # 門檻：V32總分 >= 86, 且技術面量能面有基本分
     mask = (df['技術分'] >= 80) & (df['量能分'] >= 60) & (df['V32總分'] >= 86) & (df['V32總分'] <= 92)
     
     filtered = df[mask].copy()
@@ -301,6 +304,8 @@ def get_stratified_selection(df):
 def get_raw_top10(df):
     """V32 總分 Top 10"""
     if df.empty: return df
+    # 同樣做數字轉換確保排序正常
+    df['V32總分'] = pd.to_numeric(df['V32總分'], errors='coerce').fillna(0)
     return df.sort_values(by='V32總分', ascending=False).head(10)
 
 # --- 主程式 ---
@@ -332,7 +337,6 @@ def main():
             
             st.info(f"🎯 純個股分佈：{' | '.join(stats)}")
             if not final_df.empty:
-                # 這裡加入了 '穩定度' 的顏色顯示
                 st.dataframe(
                     final_df[['代號','名稱','收盤','V32總分','穩定度','技術分','量能分']]
                     .style
@@ -369,7 +373,7 @@ def main():
         else:
             st.warning("暫無資料")
 
-    # === Tab 3: 庫存管理 (邏輯不變，僅更新分數欄位名稱) ===
+    # === Tab 3: 庫存管理 ===
     with tab_inv:
         st.subheader("📝 庫存編輯器")
         if 'editor_data' not in st.session_state:
@@ -402,7 +406,7 @@ def main():
                 if not match.empty:
                     curr = match.iloc[0]['收盤']
                     nm = match.iloc[0]['名稱']
-                    sc = match.iloc[0]['V32總分'] # 更新欄位
+                    sc = match.iloc[0]['V32總分'] 
                 else:
                     try:
                         t = yf.Ticker(f"{code}.TW")
