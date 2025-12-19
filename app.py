@@ -10,9 +10,9 @@ import time
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
-    page_title="V32 戰情室 (Pro)",
+    page_title="V32 戰情室 (Pure Stock)",
     layout="wide",
-    page_icon="🔥"
+    page_icon="💎"
 )
 
 # --- 樣式設定 ---
@@ -54,11 +54,6 @@ def fetch_name_from_web(symbol):
 
 # --- 核心：V32 技術指標運算 (穩定版邏輯) ---
 def calculate_indicators(hist):
-    """
-    輸入: 歷史 K 線 (DataFrame)
-    輸出: 技術分, 量能分, 趨勢狀態
-    邏輯: 使用明確的條件判斷 (例如: 站上月線+5分)
-    """
     if len(hist) < 60: return 0, 0, "Data Insufficient"
 
     # 1. 準備數據
@@ -98,18 +93,18 @@ def calculate_indicators(hist):
     # A. 技術分 (Technical)
     t_score = 60
     
-    # 1. 多日趨勢 (Trend)
+    # 1. 多日趨勢
     if close.iloc[-1] > ma20: t_score += 5        # 站上月線
     if ma20 > ma20_prev: t_score += 5             # 月線翻揚
     if ma5 > ma20 and ma20 > ma60: t_score += 10  # 多頭排列
     
-    # 2. 動能 (Momentum)
+    # 2. 動能
     if rsi_now > 50: t_score += 5                 # RSI 強勢
     if rsi_now > 70: t_score += 5                 # RSI 過熱區
-    if macd_now > signal_now: t_score += 5        # MACD 金叉狀態
+    if macd_now > signal_now: t_score += 5        # MACD 金叉
     
-    # 3. 結構 (Structure)
-    high_20 = high.rolling(20).max().iloc[-2]     # 昨收為止的20日高
+    # 3. 結構
+    high_20 = high.rolling(20).max().iloc[-2]
     if close.iloc[-1] > high_20: t_score += 10    # 突破 20 日新高
 
     # B. 量能分 (Volume)
@@ -121,11 +116,11 @@ def calculate_indicators(hist):
     if current_vol > vol_ma5: v_score += 10       # 大於週均量
     
     # 2. 量價配合
-    is_red = close.iloc[-1] > open_p.iloc[-1]     # 收紅
-    vol_increase = current_vol > vol.iloc[-2]     # 量增
+    is_red = close.iloc[-1] > open_p.iloc[-1]
+    vol_increase = current_vol > vol.iloc[-2]
     if is_red and vol_increase: v_score += 15     # 價漲量增
     
-    # 3. 爆量檢測
+    # 3. 爆量
     if current_vol > vol_ma20 * 1.5: v_score += 5 # 放量 1.5 倍
 
     # 上限防呆
@@ -137,7 +132,7 @@ def calculate_indicators(hist):
     
     return t_score, v_score, trend
 
-# --- 批次運算引擎 (Streamlit Cache) ---
+# --- 批次運算引擎 ---
 @st.cache_data(ttl=3600)
 def run_v32_engine(ticker_list):
     results = []
@@ -149,17 +144,15 @@ def run_v32_engine(ticker_list):
         symbol = str(row['代號'])
         name = str(row.get('名稱', ''))
         
-        status.text(f"正在分析 K 線結構: {symbol} {name} ({i+1}/{total})...")
+        status.text(f"正在分析: {symbol} {name} ({i+1}/{total})...")
         p_bar.progress((i + 1) / total)
         
         try:
-            # 抓 3 個月資料算 MA60
             stock = yf.Ticker(f"{symbol}.TW")
             hist = stock.history(period="3mo")
             
             if not hist.empty:
                 t_s, v_s, tr = calculate_indicators(hist)
-                # 總分權重 (7:3)
                 total_s = (t_s * 0.7) + (v_s * 0.3)
                 
                 results.append({
@@ -224,15 +217,17 @@ def save_holdings(df):
     except Exception as e:
         st.error(f"❌ 儲存失敗: {e}")
 
-# --- 篩選邏輯 ---
+# --- 篩選與排序邏輯 ---
 
 def get_stratified_selection(df):
-    """分層精選邏輯 (Strict)"""
+    """分層精選邏輯"""
     if df.empty: return df, []
+    # 硬指標
     mask = (df['技術分'] >= 88) & (df['量能分'] >= 82) & (df['趨勢'] == 'Rising') & (df['總分'] >= 86) & (df['總分'] <= 92)
     filtered = df[mask].copy()
-    if filtered.empty: return pd.DataFrame(), ["無符合硬指標標的"]
+    if filtered.empty: return pd.DataFrame(), ["無符合條件標的"]
     
+    # 分層取前5
     b_a = filtered[(filtered['總分'] >= 90) & (filtered['總分'] <= 92)].sort_values('總分', ascending=False).head(5)
     b_b = filtered[(filtered['總分'] >= 88) & (filtered['總分'] < 90)].sort_values('總分', ascending=False).head(5)
     b_c = filtered[(filtered['總分'] >= 86) & (filtered['總分'] < 88)].sort_values('總分', ascending=False).head(5)
@@ -242,60 +237,61 @@ def get_stratified_selection(df):
     return final, stats
 
 def get_raw_top10(df):
-    """原始分數 Top 10 (Raw Logic)"""
+    """原始分數 Top 10"""
     if df.empty: return df
     return df.sort_values(by='總分', ascending=False).head(10)
 
 # --- 主程式 ---
 def main():
-    st.title("🔥 V32 戰情室 (Pro)")
+    st.title("💎 V32 戰情室 (Pure Stock)")
     st.caption(f"最後更新: {get_taiwan_time()}")
     
     v32_df, err = load_and_process_data()
     
+    if err: st.error(err)
+
+    # 🔥 關鍵修改：全域過濾 (剔除 ETF, KY, DR, 債券, 特別股)
+    if not v32_df.empty:
+        # 1. 標記類別
+        v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱')) or 'KY' in str(r.get('名稱')) or str(r['代號']).startswith(('00','91')) or str(r['代號'])[-1].isalpha() or (len(str(r['代號']))>4 and str(r['代號']).isdigit())) else 'General', axis=1)
+        
+        # 2. 直接過濾：只保留 'General'
+        v32_df = v32_df[v32_df['cat'] == 'General']
+        
+        if v32_df.empty:
+            st.warning("⚠️ 過濾後沒有任何一般個股 (General Stocks)！")
+
+    # 建立主分頁
     tab_strat, tab_raw, tab_inv = st.tabs(["🎯 分層精選 Top 15", "🏆 原始分數 Top 10", "💼 庫存管理"])
     
-    if not v32_df.empty:
-        v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱')) or 'KY' in str(r.get('名稱')) or str(r['代號']).startswith(('00','91')) or str(r['代號'])[-1].isalpha() or (len(str(r['代號']))>4 and str(r['代號']).isdigit())) else 'General', axis=1)
-
     fmt_score = {'收盤':'{:.2f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '總分':'{:.1f}'}
 
-    # === Tab 1: 分層精選 ===
+    # === Tab 1: 分層精選 (Stratified) ===
     with tab_strat:
-        if err: st.error(err)
         if not v32_df.empty:
-            gen, stats_g = get_stratified_selection(v32_df[v32_df['cat']=='General'])
-            spec, stats_s = get_stratified_selection(v32_df[v32_df['cat']=='Special'])
+            # 直接使用過濾後的 v32_df (已確保全是一般個股)
+            final_df, stats = get_stratified_selection(v32_df)
             
-            t1, t2 = st.tabs(["🏢 一般個股", "📊 特殊/ETF"])
-            with t1:
-                st.info(f"分佈：{' | '.join(stats_g)}")
-                if not gen.empty: st.dataframe(gen[['代號','名稱','收盤','技術分','量能分','總分','趨勢']].style.format(fmt_score), hide_index=True, use_container_width=True)
-                else: st.warning("無符合條件標的")
-            with t2:
-                st.info(f"分佈：{' | '.join(stats_s)}")
-                if not spec.empty: st.dataframe(spec[['代號','名稱','收盤','技術分','量能分','總分','趨勢']].style.format(fmt_score), hide_index=True, use_container_width=True)
-                else: st.warning("無符合條件標的")
-        else: st.warning("暫無資料")
+            st.info(f"🎯 純個股分佈：{' | '.join(stats)}")
+            if not final_df.empty:
+                # 這裡使用了熱力圖 (需要 matplotlib)
+                st.dataframe(final_df[['代號','名稱','收盤','技術分','量能分','總分','趨勢']].style.format(fmt_score).background_gradient(subset=['總分'], cmap='Reds'), hide_index=True, use_container_width=True)
+            else:
+                st.warning("無符合條件的一般個股。")
+        else:
+            st.warning("暫無資料")
 
-    # === Tab 2: 原始 Top 10 (熱力圖回歸!) ===
+    # === Tab 2: 原始 Top 10 (Raw) ===
     with tab_raw:
-        st.markdown("### 🏆 全市場原始分數霸榜 (Top 10)")
+        st.markdown("### 🏆 原始分數霸榜 (Top 10)")
+        st.caption("排除 ETF/KY/DR 後，全市場最強 10 檔個股。")
+        
         if not v32_df.empty:
-            raw_gen = get_raw_top10(v32_df[v32_df['cat']=='General'])
-            raw_spec = get_raw_top10(v32_df[v32_df['cat']=='Special'])
-            
-            c1, c2 = st.columns(2)
-            with c1:
-                st.subheader("🏢 一般個股")
-                if not raw_gen.empty:
-                    # 使用 Reds 熱力圖
-                    st.dataframe(raw_gen[['代號','名稱','收盤','總分','技術分','量能分']].style.format(fmt_score).background_gradient(subset=['總分'], cmap='Reds'), hide_index=True, use_container_width=True)
-            with c2:
-                st.subheader("📊 特殊/ETF")
-                if not raw_spec.empty:
-                    # 使用 Greens 熱力圖
-                    st.dataframe(raw_spec[['代號','名稱','收盤','總分','技術分','量能分']].style.format(fmt_score).background_gradient(subset=['總分'], cmap='Greens'), hide_index=True, use_container_width=True)
+            raw_df = get_raw_top10(v32_df)
+            if not raw_df.empty:
+                st.dataframe(raw_df[['代號','名稱','收盤','總分','技術分','量能分']].style.format(fmt_score).background_gradient(subset=['總分'], cmap='Reds'), hide_index=True, use_container_width=True)
+            else:
+                st.info("無資料")
         else:
             st.warning("暫無資料")
 
@@ -328,12 +324,15 @@ def main():
                 qty = float(r['持有股數'] or 0)
                 cost = float(r['買入均價'] or 0)
                 
+                # 從已過濾的清單找 (如果庫存是 ETF，這裡會找不到)
+                # 所以我們需要一個 fallback 機制去抓現價
                 match = v32_df[v32_df['代號']==code]
                 if not match.empty:
                     curr = match.iloc[0]['收盤']
                     nm = match.iloc[0]['名稱']
                     sc = match.iloc[0]['總分']
                 else:
+                    # 榜外或被過濾掉的 (如 ETF 庫存)
                     try:
                         t = yf.Ticker(f"{code}.TW")
                         h = t.history(period='1d')
