@@ -1,7 +1,9 @@
 streamlit
 pandas
+numpy
 yfinance
 PyGithub
-matplotlib
 twstock
 lxml
+requests
+beautifulsoup4
