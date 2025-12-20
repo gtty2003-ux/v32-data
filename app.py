@@ -129,7 +129,9 @@ def get_chip_analysis(symbol_list):
             time.sleep(0.5) # 避免太快被證交所擋
             
         except Exception as e:
-            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ 讀取失敗'})
+            # 這樣我們才能看到是 "lxml 沒裝好" 還是 "Connection refused (被擋)"
+            error_msg = str(e)
+            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': f'❌ {error_msg}'})
             
     p_bar.empty()
     status.empty()
