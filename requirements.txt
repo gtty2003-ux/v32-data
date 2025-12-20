@@ -4,3 +4,4 @@ yfinance
 PyGithub
 matplotlib
 twstock
+lxml
