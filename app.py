@@ -2,12 +2,12 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 import yfinance as yf
 from github import Github 
 import time
-import twstock  # <--- 新增這個套件
+from FinMind.data import DataLoader # 使用 FinMind 避免被鎖 IP
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
@@ -55,69 +55,74 @@ def color_stability(val):
     except: pass
     return ''
 
-# --- 新增：籌碼分析函數 (使用 twstock) ---
+# --- 新增：籌碼分析函數 (使用 FinMind) ---
 def get_chip_analysis(symbol_list):
     """
-    針對篩選後的清單抓取三大法人資料
+    針對篩選後的清單抓取三大法人資料 (使用 FinMind API)
     """
     chip_data = []
+    
+    # 初始化 FinMind Loader
+    dl = DataLoader()
     
     # 進度條
     p_bar = st.progress(0)
     status = st.empty()
     total = len(symbol_list)
     
+    # 設定抓取範圍 (抓過去 10 天確保遇到假日也能抓到最近的交易日)
+    start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+    
     for i, symbol in enumerate(symbol_list):
         status.text(f"🔍 分析籌碼結構: {symbol} ({i+1}/{total})...")
         p_bar.progress((i + 1) / total)
         
         try:
-            stock = twstock.Stock(symbol)
-            # 抓取最近 5 日的三大法人資料
-            # twstock 的 institutional 屬性會回傳列表，最新在後
-            inst = stock.institutional 
+            # 抓取資料
+            df = dl.taiwan_stock_institutional_investors(
+                stock_id=symbol,
+                start_date=start_date
+            )
             
-            if not inst or len(inst) < 1:
-                chip_data.append({'代號': symbol, '投信': '無資料', '外資': '無資料', '主力動向': '⚪ 資料不足'})
+            if df.empty:
+                chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '⚪ 資料不足'})
                 continue
                 
-            # 取得最近一日與累積數據
-            last_day = inst[-1] # [日期, 外資買賣超, 投信買賣超, 自營商買賣超, 合計]
-            prev_day = inst[-2] if len(inst) > 1 else last_day
+            # 取得最新一天的日期 (通常是最後一筆資料的日期)
+            latest_date = df['date'].iloc[-1]
             
-            # 數據清洗 (twstock 有時回傳 None)
-            foreign_buy = int(last_day[1]) if last_day[1] else 0
-            trust_buy = int(last_day[2]) if last_day[2] else 0
-            dealer_buy = int(last_day[3]) if last_day[3] else 0
+            # 篩選出最新那天的所有法人資料
+            day_data = df[df['date'] == latest_date]
+            
+            # 計算外資與投信的買賣超 (FinMind 單位是股，除以 1000 換算成張)
+            # 外資通常包含 'Foreign_Investor' 字串
+            foreign_net = day_data[day_data['name'].str.contains('Foreign')]['buy'].sum() - \
+                          day_data[day_data['name'].str.contains('Foreign')]['sell'].sum()
+            foreign_buy = int(foreign_net // 1000)
+
+            # 投信名稱通常是 'Investment_Trust'
+            trust_net = day_data[day_data['name'] == 'Investment_Trust']['buy'].sum() - \
+                        day_data[day_data['name'] == 'Investment_Trust']['sell'].sum()
+            trust_buy = int(trust_net // 1000)
             
             # --- 簡易籌碼邏輯判定 ---
             status_str = ""
             
-            # 1. 投信判定 (權重最高)
-            if trust_buy > 0:
-                status_str += "🔴 投信買進 "
-            elif trust_buy < 0:
-                status_str += "🟢 投信賣出 "
+            # 1. 投信判定
+            if trust_buy > 0: status_str += "🔴 投信買 "
+            elif trust_buy < 0: status_str += "🟢 投信賣 "
                 
             # 2. 外資判定
-            if foreign_buy > 1000: # 外資買超大於 1000 張
-                status_str += "🔥 外資大買 "
-            elif foreign_buy < -1000:
-                status_str += "🧊 外資倒貨 "
+            if foreign_buy > 1000: status_str += "🔥 外資大買 "
+            elif foreign_buy < -1000: status_str += "🧊 外資倒貨 "
             
-            # 3. 土洋對作/合作
-            if trust_buy > 0 and foreign_buy > 0:
-                final_tag = "🚀 土洋合買"
-            elif trust_buy > 0 and foreign_buy < 0:
-                final_tag = "⚔️ 土洋對作(信)" # 投信買，外資賣
-            elif trust_buy < 0 and foreign_buy > 0:
-                final_tag = "⚔️ 土洋對作(外)" # 外資買，投信賣
-            elif trust_buy < 0 and foreign_buy < 0:
-                final_tag = "☠️ 主力棄守"
-            elif trust_buy == 0 and abs(foreign_buy) < 50:
-                final_tag = "⚪ 籌碼觀望"
-            else:
-                final_tag = "🟡 一般輪動"
+            # 3. 綜合標籤
+            if trust_buy > 0 and foreign_buy > 0: final_tag = "🚀 土洋合買"
+            elif trust_buy > 0 and foreign_buy < 0: final_tag = "⚔️ 土洋對作(信)" # 信買外賣
+            elif trust_buy < 0 and foreign_buy > 0: final_tag = "⚔️ 土洋對作(外)" # 外買信賣
+            elif trust_buy < 0 and foreign_buy < 0: final_tag = "☠️ 主力棄守"
+            elif trust_buy == 0 and abs(foreign_buy) < 50: final_tag = "⚪ 籌碼觀望"
+            else: final_tag = "🟡 一般輪動"
                 
             chip_data.append({
                 '代號': symbol,
@@ -126,12 +131,11 @@ def get_chip_analysis(symbol_list):
                 '主力動向': f"{final_tag} | {status_str}"
             })
             
-            time.sleep(0.5) # 避免太快被證交所擋
+            # FinMind 是 API，稍微停一下即可
+            time.sleep(0.05) 
             
         except Exception as e:
-            # 這樣我們才能看到是 "lxml 沒裝好" 還是 "Connection refused (被擋)"
-            error_msg = str(e)
-            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': f'❌ {error_msg}'})
+            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': f'❌ {str(e)}'})
             
     p_bar.empty()
     status.empty()
@@ -315,7 +319,7 @@ def get_raw_top10(df):
 # --- 主程式 ---
 def main():
     st.title("⚔️ V32 戰情室 (Attack Focus)")
-    st.caption(f"最後更新: {get_taiwan_time()} | 核心邏輯：攻擊力優先 + 籌碼輔助")
+    st.caption(f"最後更新: {get_taiwan_time()} | 核心邏輯：攻擊力優先 + FinMind 籌碼輔助")
     
     v32_df, err = load_and_process_data()
     if err: st.error(err)
@@ -337,10 +341,11 @@ def main():
                 # --- 新增功能區塊 ---
                 st.markdown("#### 🕵️ 籌碼結構偵測")
                 if st.button("🚀 啟動籌碼掃描 (查詢三大法人動向)"):
-                    with st.spinner("正在連線證交所抓取資料，請稍候..."):
+                    with st.spinner("正在連線 FinMind 歷史資料庫..."):
                         chip_df = get_chip_analysis(final_df['代號'].tolist())
                         # 合併資料
-                        final_df = pd.merge(final_df, chip_df, on='代號', how='left')
+                        if not chip_df.empty:
+                            final_df = pd.merge(final_df, chip_df, on='代號', how='left')
                 
                 # 顯示表格
                 cols_to_show = ['代號','名稱','收盤','攻擊分','穩定度','技術分','量能分']
@@ -400,8 +405,6 @@ def main():
         st.divider()
         
         if not edited.empty:
-            # (此處為庫存診斷邏輯，為節省篇幅省略，若需完整版請告知，通常這段不需修改)
-            # 這裡只要貼上你原本程式碼 Tab 3 的後半段即可
             res = []
             score_map = {}
             if not v32_df.empty:
