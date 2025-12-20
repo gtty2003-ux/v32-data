@@ -178,4 +178,52 @@ with tab1:
     # 處理買入
     stocks_to_buy = edited_df[edited_df['Buy'] == True]
     if not stocks_to_buy.empty:
-        if st.button(f"
+        if st.button(f"將選中的 {len(stocks_to_buy)} 檔加入庫存"):
+            for index, row in stocks_to_buy.iterrows():
+                if row['StockID'] not in st.session_state.inventory['StockID'].values:
+                    new_entry = pd.DataFrame([{
+                        'StockID': row['StockID'], 
+                        'Name': row['Name'], 
+                        'CostPrice': row['Price'], 
+                        'LastPrice': row['Price'],
+                        'HighestPrice': row['Price']
+                    }])
+                    st.session_state.inventory = pd.concat([st.session_state.inventory, new_entry], ignore_index=True)
+            st.success("已加入庫存！請至 Tab 2 查看。")
+            st.rerun()
+
+# --- Tab 2: 庫存 ---
+with tab2:
+    st.subheader("持股損益與出場建議")
+    
+    if st.session_state.inventory.empty:
+        st.warning("無庫存。")
+    else:
+        # --- 模擬情境注入 (測試邏輯用) ---
+        # 讓 "示範飆股" 漲破 80 (測試藍色續抱)
+        df_market.loc[df_market['StockID'] == '9999', 'Price'] = 85 
+        df_market.loc[df_market['StockID'] == '9999', 'TechScore'] = 80
+        # 讓 "示範弱勢" 跌破 10% (測試紅色賣出)
+        df_market.loc[df_market['StockID'] == '8888', 'Price'] = 40 
+        # --------------------------------
+        
+        inventory_analysis = strategy_v33_inventory_check(st.session_state.inventory, df_market)
+        
+        def highlight_signal(row):
+            if row['Signal'] == 'sell-signal': return ['background-color: #FFCDD2; color: black'] * len(row)
+            if row['Signal'] == 'hold-run': return ['background-color: #B3E5FC; color: black'] * len(row)
+            return ['background-color: #C8E6C9; color: black'] * len(row)
+
+        st.dataframe(
+            inventory_analysis.style.apply(highlight_signal, axis=1),
+            column_config={
+                "PnL%": st.column_config.NumberColumn("損益 %", format="%.2f %%"),
+                "Highest": st.column_config.NumberColumn("持有高點"),
+            },
+            hide_index=True,
+            height=500
+        )
+        
+        if st.button("🗑️ 清空所有庫存"):
+            st.session_state.inventory = pd.DataFrame(columns=['StockID', 'Name', 'CostPrice', 'LastPrice', 'HighestPrice'])
+            st.rerun()
