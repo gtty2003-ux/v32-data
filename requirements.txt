@@ -3,7 +3,4 @@ pandas
 numpy
 yfinance
 PyGithub
-twstock
-lxml
-requests
-beautifulsoup4
+FinMind
