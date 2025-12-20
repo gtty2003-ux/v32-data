@@ -340,7 +340,7 @@ def main():
             if not final_df.empty:
                 # --- 新增功能區塊 ---
                 st.markdown("#### 🕵️ 籌碼結構偵測")
-                if st.button("🚀 啟動籌碼掃描 (查詢三大法人動向)"):
+                if st.button("🚀 啟動籌碼掃描 (查詢三大法人動向)", key="btn_strat_scan"):
                     with st.spinner("正在連線 FinMind 歷史資料庫..."):
                         chip_df = get_chip_analysis(final_df['代號'].tolist())
                         # 合併資料
@@ -366,14 +366,29 @@ def main():
         else:
             st.warning("暫無資料")
 
-    # === Tab 2: Top 10 (維持原樣) ===
+    # === Tab 2: Top 10 + 籌碼分析 (已更新) ===
     with tab_raw:
         st.markdown("### 🏆 全市場攻擊力排行 (Top 10)")
+        st.caption("本排行純粹反映「當日攻擊動能」，不含穩定度加權。")
+        
         if not v32_df.empty:
             raw_df = get_raw_top10(v32_df)
             if not raw_df.empty:
+                # --- 新增功能區塊 ---
+                st.markdown("#### 🕵️ 籌碼結構偵測")
+                if st.button("🚀 啟動籌碼掃描 (Top 10)", key="btn_raw_scan"):
+                    with st.spinner("正在連線 FinMind 歷史資料庫..."):
+                        chip_df = get_chip_analysis(raw_df['代號'].tolist())
+                        if not chip_df.empty:
+                            raw_df = pd.merge(raw_df, chip_df, on='代號', how='left')
+
+                # 顯示表格
+                cols_to_show = ['代號','名稱','收盤','攻擊分','穩定度','技術分','量能分']
+                if '主力動向' in raw_df.columns:
+                    cols_to_show += ['主力動向', '投信(張)', '外資(張)']
+
                 st.dataframe(
-                    raw_df[['代號','名稱','收盤','攻擊分','穩定度','技術分','量能分']]
+                    raw_df[cols_to_show]
                     .style
                     .format(fmt_score)
                     .background_gradient(subset=['攻擊分'], cmap='Reds')
@@ -381,6 +396,10 @@ def main():
                     hide_index=True, 
                     use_container_width=True
                 )
+            else:
+                st.info("無資料")
+        else:
+            st.warning("暫無資料")
 
     # === Tab 3: 庫存管理 (維持原樣) ===
     with tab_inv:
