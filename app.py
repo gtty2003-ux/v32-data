@@ -345,7 +345,7 @@ def main():
         else:
             st.warning("暫無資料")
 
-    # === Tab 3: 庫存管理 ===
+    # === Tab 3: 庫存管理 (進化版：含出場訊號) ===
     with tab_inv:
         st.subheader("📝 庫存編輯器")
         if 'editor_data' not in st.session_state:
@@ -366,42 +366,118 @@ def main():
             st.rerun()
             
         st.divider()
-        if not edited.empty and not v32_df.empty:
+        
+        # --- 庫存診斷邏輯 ---
+        if not edited.empty:
             res = []
-            for _, r in edited.iterrows():
+            # 建立快查表 (為了快速取得攻擊分)
+            score_map = {}
+            if not v32_df.empty:
+                score_map = v32_df.set_index('代號')['攻擊分'].to_dict()
+
+            progress_text = st.empty()
+            
+            for idx, r in edited.iterrows():
                 if not r['股票代號']: continue
                 code = str(r['股票代號'])
                 qty = float(r['持有股數'] or 0)
                 cost = float(r['買入均價'] or 0)
                 
-                match = v32_df[v32_df['代號']==code]
-                if not match.empty:
-                    curr = match.iloc[0]['收盤']
-                    nm = match.iloc[0]['名稱']
-                    sc = match.iloc[0]['攻擊分'] 
-                else:
-                    try:
-                        t = yf.Ticker(f"{code}.TW")
-                        h = t.history(period='1d')
-                        curr = h['Close'].iloc[-1] if not h.empty else 0
-                        nm = code; sc = 0
-                    except: curr=0; nm=code; sc=0
+                # 預設值
+                curr = 0
+                nm = code
+                sc = 0
+                signal = "⚪ 資料不足"
+                
+                try:
+                    # 嘗試抓取即時資料與 MA20
+                    stock = yf.Ticker(f"{code}.TW")
+                    # 抓 1.5 個月確保能算 MA20
+                    h = stock.history(period="1mo") 
+                    
+                    if not h.empty:
+                        curr = h['Close'].iloc[-1]
+                        # 嘗試取得名稱
+                        if code in score_map:
+                            # 如果在庫存表裡有抓到過，用表裡的資料
+                            match = v32_df[v32_df['代號'] == code].iloc[0]
+                            nm = match['名稱']
+                            sc = match['攻擊分']
+                        else:
+                            # 榜外股，嘗試抓名稱
+                            nm = stock.info.get('shortName', code)
+                            # 榜外股預設分數為 0 (因為沒跑完整引擎)
+                            sc = 0 
+                        
+                        # --- 🚦 燈號判定核心邏輯 ---
+                        ma20 = h['Close'].rolling(20).mean().iloc[-1]
+                        
+                        # 1. 檢查是否破線 (最嚴重)
+                        if not np.isnan(ma20) and curr < ma20:
+                            signal = "🔴 破線(停損)"
+                        # 2. 檢查動能是否熄火 (次之)
+                        elif sc > 0 and sc < 60:
+                            signal = "🟡 熄火(停利)"
+                        # 3. 檢查是否為榜外孤兒
+                        elif sc == 0:
+                            if curr >= ma20:
+                                signal = "⚪ 榜外(觀察)"
+                            else:
+                                signal = "🔴 破線(榜外)"
+                        else:
+                            signal = "🟢 續抱"
+                        # -------------------------
+                        
+                except Exception as e:
+                    pass
                 
                 val = curr * qty
                 c_tot = cost * qty
                 pl = val - c_tot
                 roi = (pl/c_tot*100) if c_tot>0 else 0
                 
-                res.append({'代號':code, '名稱':nm, '現價':curr, '成本':cost, '股數':qty, '損益':pl, '報酬率%':roi, '攻擊分': f"{sc:.1f}" if sc>0 else "榜外"})
+                # 分數顯示優化
+                score_display = f"{sc:.1f}" if sc > 0 else "N/A"
+                
+                res.append({
+                    '代號': code, 
+                    '名稱': nm, 
+                    '現價': curr, 
+                    '成本': cost, 
+                    '股數': qty, 
+                    '損益': pl, 
+                    '報酬率%': roi, 
+                    '攻擊分': score_display,
+                    '建議': signal
+                })
+            
+            progress_text.empty()
             
             if res:
                 df_res = pd.DataFrame(res)
+                
+                # 上方摘要卡片
                 c1, c2, c3 = st.columns(3)
                 c1.metric("總成本", f"${(df_res['成本']*df_res['股數']).sum():,.0f}")
-                c2.metric("總損益", f"${df_res['損益'].sum():,.0f}")
+                total_pl = df_res['損益'].sum()
+                c2.metric("總損益", f"${total_pl:,.0f}", delta=f"{total_pl:,.0f}")
                 c3.metric("總市值", f"${(df_res['現價']*df_res['股數']).sum():,.0f}")
                 
-                st.dataframe(df_res.style.map(color_surplus, subset=['損益','報酬率%']).format({'現價':'{:.2f}','損益':'{:+,.0f}','報酬率%':'{:+.2f}%'}), use_container_width=True, hide_index=True)
+                # 定義燈號顏色
+                def color_signal(val):
+                    if "🔴" in val: return 'color: white; background-color: #d32f2f; font-weight: bold;'
+                    if "🟡" in val: return 'color: black; background-color: #fbc02d; font-weight: bold;'
+                    if "🟢" in val: return 'color: white; background-color: #388e3c; font-weight: bold;'
+                    return ''
+
+                st.dataframe(
+                    df_res.style
+                    .map(color_surplus, subset=['損益','報酬率%'])
+                    .map(color_signal, subset=['建議'])
+                    .format({'現價':'{:.2f}','損益':'{:+,.0f}','報酬率%':'{:+.2f}%'}), 
+                    use_container_width=True, 
+                    hide_index=True
+                )
 
 if __name__ == "__main__":
     main()
