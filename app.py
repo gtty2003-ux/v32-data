@@ -1,153 +1,216 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import yfinance as yf
-from github import Github 
+import numpy as np # 僅用於數據處理，不進行模擬
 from datetime import datetime
 import pytz
+import os
 
-# --- 設定頁面資訊 ---
+# ==========================================
+# 1. 頁面配置與樣式 (V32 Standard)
+# ==========================================
 st.set_page_config(
-    page_title="V32 戰情室 (Attack Focus)",
+    page_title="V32 智能選股系統 (Standard)",
     layout="wide",
-    page_icon="⚔️"
+    initial_sidebar_state="expanded"
 )
 
-# --- 樣式設定 (符合你的綠色/黑色高對比需求) ---
+# V32 指定配色: 表格高亮 #C8E6C9
 st.markdown("""
     <style>
-    /* 表頭樣式：淺綠色背景 + 黑色文字 */
-    .stDataFrame thead tr th {
-        background-color: #C8E6C9 !important; 
-        color: black !important;
-        font-weight: bold;
-        font-size: 16px;
-    }
-    /* 指標數值加大 */
-    div[data-testid="stMetricValue"] {
-        font-size: 26px;
-        font-weight: bold;
-        color: #1b5e20;
-    }
+    .stDataFrame { font-size: 14px; }
+    .highlight-v32 { background-color: #C8E6C9 !important; color: black !important; }
     </style>
-    """, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-# --- 全域變數 ---
-# 請確認你的 Repo 名稱是否正確
-REPO_KEY = "gtty2003-ux/v32-data" 
-FILE_PATH = "holdings.csv"
+# 時間標準: 台北時間 UTC+8
+tw_tz = pytz.timezone('Asia/Taipei')
+current_time = datetime.now(tw_tz).strftime('%Y-%m-%d %H:%M:%S')
 
-# --- 工具函數 ---
-def get_taiwan_time():
-    utc_now = datetime.utcnow()
-    tw_time = utc_now.replace(tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Taipei'))
-    return tw_time.strftime("%Y-%m-%d %H:%M:%S")
+# ==========================================
+# 2. 資料讀取與處理 (Data Ingestion)
+# ==========================================
 
-def color_surplus(val):
-    """損益著色：台股慣例 紅賺/綠賠"""
-    if val > 0: return 'color: #d32f2f; font-weight: bold;' # 紅
-    elif val < 0: return 'color: #388e3c; font-weight: bold;' # 綠
-    return 'color: black'
-
-def color_signal_bg(val):
-    """操作建議燈號"""
-    if "🔴" in val: return 'background-color: #ffcdd2; color: #b71c1c; font-weight: bold;' # 淺紅底深紅字
-    if "🟡" in val: return 'background-color: #fff9c4; color: #f57f17; font-weight: bold;' # 淺黃底深橘字
-    if "🟢" in val: return 'background-color: #c8e6c9; color: #1b5e20; font-weight: bold;' # 淺綠底深綠字
-    return ''
-
-# --- 核心邏輯：GitHub 資料存取 ---
-def load_holdings():
+def get_market_data():
+    """
+    [V32 核心] 讀取真實資料檔案。
+    不再模擬，只針對現在。
+    """
+    file_path = 'twse_data.csv' # 請確認檔名一致
+    
+    if not os.path.exists(file_path):
+        st.error(f"❌ 找不到資料檔：{file_path}")
+        st.warning("請將您的雲端檔案下載，改名為 'twse_data.csv' 並放在同目錄下。")
+        # 回傳空表以防當機
+        return pd.DataFrame(columns=['StockID', 'Name', 'Price', 'TechScore', 'VolScore'])
+    
     try:
-        token = st.secrets["general"]["GITHUB_TOKEN"]
-        g = Github(token)
-        repo = g.get_repo(REPO_KEY)
-        contents = repo.get_contents(FILE_PATH)
-        df = pd.read_csv(contents.download_url)
-        # 強制轉型避免錯誤
-        df['股票代號'] = df['股票代號'].astype(str).str.strip()
-        # 補齊欄位防呆
-        expected_cols = ["股票代號", "買入均價", "持有股數"]
-        for c in expected_cols:
-            if c not in df.columns: 
-                df[c] = 0 if c != "股票代號" else ""
-        return df[expected_cols]
-    except Exception as e:
-        # 若檔案不存在或讀取失敗，回傳空表
-        return pd.DataFrame(columns=["股票代號", "買入均價", "持有股數"])
-
-def save_holdings(df):
-    try:
-        token = st.secrets["general"]["GITHUB_TOKEN"]
-        g = Github(token)
-        repo = g.get_repo(REPO_KEY)
-        csv_content = df.to_csv(index=False)
-        
+        # 讀取 CSV (假設編碼為 utf-8 或 big5，視您的檔案而定)
         try:
-            # 嘗試更新現有檔案
-            contents = repo.get_contents(FILE_PATH)
-            repo.update_file(contents.path, f"Update {get_taiwan_time()}", csv_content, contents.sha)
-            st.toast("✅ 庫存雲端備份成功！", icon="☁️")
-        except:
-            # 若檔案不存在則建立
-            repo.create_file(FILE_PATH, "Create holdings.csv", csv_content)
-            st.toast("✅ 庫存檔建立成功！", icon="☁️")
-            
-    except Exception as e:
-        st.error(f"❌ 儲存失敗: {e}")
+            df = pd.read_csv(file_path, encoding='utf-8')
+        except UnicodeDecodeError:
+            df = pd.read_csv(file_path, encoding='big5') # 嘗試 Big5 (常見於台股資料)
 
-# --- 核心邏輯：V32 引擎 (簡化版，用於即時運算庫存) ---
-def get_stock_health(symbol, ref_score_map):
-    """
-    針對單一庫存進行健康檢查
-    returns: (現價, MA20, 攻擊分, 建議訊號)
-    """
-    try:
-        ticker = yf.Ticker(f"{symbol}.TW")
-        hist = ticker.history(period="3mo") # 抓長一點算 MA60 也行，這邊只用 MA20
+        # 資料前處理 (確保欄位名稱對應)
+        # 假設您的 CSV 欄位名稱可能不同，這裡做個簡單的映射防呆
+        # 這裡預設您的 CSV 已經有: StockID, Name, Price, TechScore, VolScore
         
-        if len(hist) < 20: 
-            return 0, 0, 0, "⚪ 資料不足"
-            
-        close = hist['Close'].iloc[-1]
-        ma20 = hist['Close'].rolling(20).mean().iloc[-1]
+        # 確保數值型態正確
+        df['Price'] = pd.to_numeric(df['Price'], errors='coerce')
+        df['TechScore'] = pd.to_numeric(df['TechScore'], errors='coerce')
+        df['VolScore'] = pd.to_numeric(df['VolScore'], errors='coerce')
         
-        # 取得該股今日的 V32 攻擊分 (若在榜內)
-        atk_score = ref_score_map.get(symbol, 0)
+        # V32 評分邏輯: 技術分(A)*0.7 + 量能分(B)*0.3
+        df['TotalScore'] = (df['TechScore'] * 0.7) + (df['VolScore'] * 0.3)
+        df['TotalScore'] = df['TotalScore'].round(2)
         
-        # --- 診斷邏輯 ---
-        # 1. 生死線判斷 (Price Action)
-        if close < ma20:
-            signal = "🔴 破線 (停損)"
-        # 2. 動能判斷 (V32 Score)
-        elif atk_score == 0:
-            signal = "🟡 榜外 (觀察)" # 股價在均線上，但沒攻擊力
-        elif atk_score < 60:
-            signal = "🟡 轉弱 (注意)" # 有分數但很低
-        else:
-            signal = "🟢 續抱 (強勢)" # 均線上且有攻擊分
-            
-        return close, ma20, atk_score, signal
-        
-    except:
-        return 0, 0, 0, "⚪ 連線失敗"
-
-# --- 資料載入 (主榜單) ---
-@st.cache_data(ttl=600) # 10分鐘快取
-def load_v32_data():
-    url = f"https://raw.githubusercontent.com/{REPO_KEY}/main/v32_recommend.csv"
-    try:
-        df = pd.read_csv(url)
-        # 清洗代號
-        code_col = next((c for c in ['代碼', '代號', 'Code', 'Symbol'] if c in df.columns), None)
-        if code_col:
-            df[code_col] = df[code_col].astype(str).str.strip()
-            df = df.rename(columns={code_col: '代號'})
         return df
-    except:
+        
+    except Exception as e:
+        st.error(f"讀取資料發生錯誤: {e}")
         return pd.DataFrame()
 
-# --- 主程式 ---
-def main():
-    st.title("⚔️ V32 戰情室")
-    st.caption(f"系統時間: {get_taiwan_time()} (UTC+8)")
+# ==========================================
+# 3. V32 選股邏輯 (Selection Logic)
+# ==========================================
+
+def strategy_v32_selection(df):
+    """
+    V32 標準選股邏輯：
+    1. 低價門檻: Price < 80
+    2. 數量保證: Top 20 (依總分排序)
+    """
+    if df.empty:
+        return df
+        
+    # 1. 濾除資料不全的列
+    df = df.dropna(subset=['Price', 'TotalScore'])
+    
+    # 2. 執行低價篩選
+    mask_price = df['Price'] < 80
+    df_filtered = df[mask_price].copy()
+    
+    # 3. 排序並取 Top 20
+    df_top20 = df_filtered.sort_values(by='TotalScore', ascending=False).head(20)
+    
+    # 整理顯示欄位
+    return df_top20.reset_index(drop=True)
+
+# ==========================================
+# 4. Session State (庫存暫存)
+# ==========================================
+if 'inventory' not in st.session_state:
+    st.session_state.inventory = pd.DataFrame(columns=['StockID', 'Name', 'CostPrice', 'Quantity'])
+
+# ==========================================
+# 5. 主介面 (Main Layout)
+# ==========================================
+
+st.title(f"📈 V32 智能選股系統 (Standard Ver.)")
+st.caption(f"系統時間: {current_time} | 資料來源: twse_data.csv | 核心邏輯: V32 (<80元, Top 20)")
+
+tab1, tab2 = st.tabs(["🔍 V32 選股掃描 (Top 20)", "📊 持股監控 (Inventory)"])
+
+# 讀取資料
+df_market = get_market_data()
+
+# --- Tab 1: 選股結果 ---
+with tab1:
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.subheader("V32 每日精選 (Top 20)")
+    with col2:
+        if st.button("🔄 重新讀取資料"):
+            st.rerun()
+
+    if df_market.empty:
+        st.info("尚無資料，請確認 CSV 檔案是否就緒。")
+    else:
+        # 執行 V32 選股
+        df_top20 = strategy_v32_selection(df_market)
+        
+        # 顯示互動表格 (包含買入功能)
+        # 為了介面乾淨，複製一份來顯示
+        df_display = df_top20.copy()
+        df_display['Select'] = False # 勾選框
+        df_display['Qty'] = 1        # 張數預設
+        
+        edited_df = st.data_editor(
+            df_display,
+            column_config={
+                "Select": st.column_config.CheckboxColumn("加入庫存", width="small"),
+                "Qty": st.column_config.NumberColumn("張數", min_value=1, step=1, width="small"),
+                "TotalScore": st.column_config.ProgressColumn("V32 總分", format="%.1f", min_value=0, max_value=100),
+                "Price": st.column_config.NumberColumn("收盤價", format="%.2f"),
+                "TechScore": st.column_config.NumberColumn("技術分(70%)", format="%d"),
+                "VolScore": st.column_config.NumberColumn("量能分(30%)", format="%d"),
+            },
+            disabled=["StockID", "Name", "Price", "TechScore", "VolScore", "TotalScore"],
+            hide_index=True,
+            height=735 # V32 指定高度
+        )
+        
+        # 處理買入動作
+        to_buy = edited_df[edited_df['Select'] == True]
+        if not to_buy.empty:
+            st.divider()
+            if st.button(f"確認買入選中的 {len(to_buy)} 檔標的"):
+                for idx, row in to_buy.iterrows():
+                    # 避免重複加入，若已存在則略過 (V32 簡單邏輯)
+                    if row['StockID'] not in st.session_state.inventory['StockID'].values:
+                        new_row = pd.DataFrame([{
+                            'StockID': row['StockID'],
+                            'Name': row['Name'],
+                            'CostPrice': float(row['Price']),
+                            'Quantity': int(row['Qty'])
+                        }])
+                        st.session_state.inventory = pd.concat([st.session_state.inventory, new_row], ignore_index=True)
+                st.success("已更新庫存！")
+                st.rerun()
+
+# --- Tab 2: 庫存管理 (基礎版) ---
+with tab2:
+    st.subheader("我的持股明細")
+    
+    if st.session_state.inventory.empty:
+        st.write("目前無庫存。")
+    else:
+        # 計算即時損益 (需比對 df_market 中的最新價)
+        # V32 不做複雜的賣出訊號，僅顯示損益
+        
+        inventory_view = st.session_state.inventory.copy()
+        
+        # 嘗試從 df_market 抓取最新價 (Current Price)
+        # 建立一個 mapping dictionary: StockID -> Price
+        if not df_market.empty:
+            price_map = df_market.set_index('StockID')['Price'].to_dict()
+            inventory_view['CurrentPrice'] = inventory_view['StockID'].map(price_map)
+        else:
+            inventory_view['CurrentPrice'] = inventory_view['CostPrice'] # 若無市價則假設不變
+            
+        # 計算損益
+        # 損益 = (現價 - 成本) * 張數 * 1000
+        inventory_view['PnL_Amt'] = (inventory_view['CurrentPrice'] - inventory_view['CostPrice']) * inventory_view['Quantity'] * 1000
+        inventory_view['PnL_Pct'] = ((inventory_view['CurrentPrice'] - inventory_view['CostPrice']) / inventory_view['CostPrice']) * 100
+        
+        # 顯示表格 (使用 V32 指定配色 highlight)
+        def color_pnl(val):
+            color = 'red' if val < 0 else 'green'
+            return f'color: {color}'
+
+        st.dataframe(
+            inventory_view,
+            column_config={
+                "StockID": "代號",
+                "Name": "名稱",
+                "CostPrice": st.column_config.NumberColumn("成本均價", format="%.2f"),
+                "CurrentPrice": st.column_config.NumberColumn("最新市價", format="%.2f"),
+                "Quantity": st.column_config.NumberColumn("庫存張數", format="%d"),
+                "PnL_Amt": st.column_config.NumberColumn("未實現損益($)", format="%d"),
+                "PnL_Pct": st.column_config.NumberColumn("報酬率(%)", format="%.2f %%"),
+            },
+            hide_index=True
+        )
+        
+        if st.button("清空庫存"):
+            st.session_state.inventory = pd.DataFrame(columns=['StockID', 'Name', 'CostPrice', 'Quantity'])
+            st.rerun()
