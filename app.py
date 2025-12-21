@@ -7,7 +7,7 @@ import pytz
 import yfinance as yf
 from github import Github 
 import time
-from FinMind.data import DataLoader # 使用 FinMind 避免被鎖 IP
+from FinMind.data import DataLoader 
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
@@ -55,85 +55,50 @@ def color_stability(val):
     except: pass
     return ''
 
-# --- 籌碼分析函數 (使用 FinMind) ---
+# --- 籌碼分析函數 ---
 def get_chip_analysis(symbol_list):
-    """
-    針對篩選後的清單抓取三大法人資料 (使用 FinMind API)
-    """
     chip_data = []
-    
-    # 初始化 FinMind Loader
     dl = DataLoader()
-    
-    # 進度條
     p_bar = st.progress(0)
     status = st.empty()
     total = len(symbol_list)
-    
-    # 設定抓取範圍 (抓過去 10 天確保遇到假日也能抓到最近的交易日)
     start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
     
     for i, symbol in enumerate(symbol_list):
         status.text(f"🔍 分析籌碼結構: {symbol} ({i+1}/{total})...")
         p_bar.progress((i + 1) / total)
-        
         try:
-            # 抓取資料
-            df = dl.taiwan_stock_institutional_investors(
-                stock_id=symbol,
-                start_date=start_date
-            )
-            
+            df = dl.taiwan_stock_institutional_investors(stock_id=symbol, start_date=start_date)
             if df.empty:
                 chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '⚪ 資料不足'})
                 continue
-                
-            # 取得最新一天的日期 (通常是最後一筆資料的日期)
             latest_date = df['date'].iloc[-1]
-            
-            # 篩選出最新那天的所有法人資料
             day_data = df[df['date'] == latest_date]
-            
-            # 計算外資與投信的買賣超 (FinMind 單位是股，除以 1000 換算成張)
-            # 外資通常包含 'Foreign_Investor' 字串
             foreign_net = day_data[day_data['name'].str.contains('Foreign')]['buy'].sum() - \
                           day_data[day_data['name'].str.contains('Foreign')]['sell'].sum()
             foreign_buy = int(foreign_net // 1000)
-
-            # 投信名稱通常是 'Investment_Trust'
             trust_net = day_data[day_data['name'] == 'Investment_Trust']['buy'].sum() - \
                         day_data[day_data['name'] == 'Investment_Trust']['sell'].sum()
             trust_buy = int(trust_net // 1000)
             
-            # --- 簡易籌碼邏輯判定 ---
             status_str = ""
-            
-            # 1. 投信判定
             if trust_buy > 0: status_str += "🔴 投信買 "
             elif trust_buy < 0: status_str += "🟢 投信賣 "
-                
-            # 2. 外資判定
             if foreign_buy > 1000: status_str += "🔥 外資大買 "
             elif foreign_buy < -1000: status_str += "🧊 外資倒貨 "
             
-            # 3. 綜合標籤
             if trust_buy > 0 and foreign_buy > 0: final_tag = "🚀 土洋合買"
-            elif trust_buy > 0 and foreign_buy < 0: final_tag = "⚔️ 土洋對作(信)" # 信買外賣
-            elif trust_buy < 0 and foreign_buy > 0: final_tag = "⚔️ 土洋對作(外)" # 外買信賣
+            elif trust_buy > 0 and foreign_buy < 0: final_tag = "⚔️ 土洋對作(信)"
+            elif trust_buy < 0 and foreign_buy > 0: final_tag = "⚔️ 土洋對作(外)"
             elif trust_buy < 0 and foreign_buy < 0: final_tag = "☠️ 主力棄守"
             elif trust_buy == 0 and abs(foreign_buy) < 50: final_tag = "⚪ 籌碼觀望"
             else: final_tag = "🟡 一般輪動"
                 
             chip_data.append({
-                '代號': symbol,
-                '投信(張)': trust_buy,
-                '外資(張)': foreign_buy,
+                '代號': symbol, '投信(張)': trust_buy, '外資(張)': foreign_buy,
                 '主力動向': f"{final_tag} | {status_str}"
             })
-            
-            # FinMind 是 API，稍微停一下即可
             time.sleep(0.05) 
-            
         except Exception as e:
             chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': f'❌ {str(e)}'})
             
@@ -141,7 +106,7 @@ def get_chip_analysis(symbol_list):
     status.empty()
     return pd.DataFrame(chip_data)
 
-# --- 核心：V32 指標運算 ---
+# --- V32 指標運算 ---
 def calculate_indicators(hist):
     if len(hist) < 65: return 0, 0, 0, "0/5"
     close = hist['Close']
@@ -152,7 +117,6 @@ def calculate_indicators(hist):
     ma5_s = close.rolling(5).mean()
     ma20_s = close.rolling(20).mean()
     ma60_s = close.rolling(60).mean()
-    
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -221,7 +185,7 @@ def calculate_indicators(hist):
 
     return t_score, v_score, attack_score, stability_str
 
-# --- 運算引擎 (Engine) ---
+# --- 運算引擎 ---
 @st.cache_data(ttl=3600)
 def run_v32_engine(ticker_list):
     results = []
@@ -275,7 +239,7 @@ def load_holdings():
         df['股票代號'] = df['股票代號'].astype(str).str.strip()
         for c in ["股票代號", "買入均價", "持有股數"]:
             if c not in df.columns: df[c] = 0 if c != "股票代號" else ""
-        return df[["股票代號", "買入均價", "持有股數"]]
+        return df
     except:
         return pd.DataFrame(columns=["股票代號", "買入均價", "持有股數"])
 
@@ -295,60 +259,40 @@ def save_holdings(df):
     except Exception as e:
         st.error(f"❌ 儲存失敗: {e}")
 
-# --- 新增：庫存更新邏輯 (取代舊的 Editor 邏輯) ---
+# --- 庫存更新邏輯 ---
 def update_inventory(buy_data, sell_data):
-    """
-    buy_data: {'code': str, 'zhang': float, 'price': float} or None
-    sell_data: {'code': str, 'zhang': float, 'price': float} or None
-    """
     df = load_holdings()
-    
     # 處理買入
     if buy_data and buy_data['code']:
         code = buy_data['code']
-        # 轉成股數 (1張 = 1000股)
         qty_add = buy_data['zhang'] * 1000
         price_in = buy_data['price']
-        
         if code in df['股票代號'].values:
-            # 既有庫存：計算加權平均
             idx = df[df['股票代號'] == code].index[0]
             old_qty = df.at[idx, '持有股數']
             old_cost = df.at[idx, '買入均價']
-            
             new_qty = old_qty + qty_add
-            # 避免除以零
             if new_qty > 0:
                 new_cost = ((old_qty * old_cost) + (qty_add * price_in)) / new_qty
             else:
                 new_cost = price_in
-            
             df.at[idx, '持有股數'] = new_qty
             df.at[idx, '買入均價'] = new_cost
         else:
-            # 新庫存：直接新增
             new_row = pd.DataFrame({'股票代號': [code], '買入均價': [price_in], '持有股數': [qty_add]})
             df = pd.concat([df, new_row], ignore_index=True)
-
     # 處理賣出
     if sell_data and sell_data['code']:
         code = sell_data['code']
         qty_sell = sell_data['zhang'] * 1000
-        # 賣出價格這裡主要用於記錄，但在純庫存表，賣出主要是扣數量，不影響剩餘庫存單位成本
-        
         if code in df['股票代號'].values:
             idx = df[df['股票代號'] == code].index[0]
             current_qty = df.at[idx, '持有股數']
             new_qty = current_qty - qty_sell
-            
             if new_qty <= 0:
-                # 出清，刪除該列
                 df = df.drop(idx)
             else:
-                # 減碼
                 df.at[idx, '持有股數'] = new_qty
-    
-    # 儲存
     save_holdings(df)
 
 # --- 篩選與排序邏輯 ---
@@ -387,160 +331,115 @@ def main():
     tab_strat, tab_raw, tab_inv = st.tabs(["🎯 今日攻擊力 Top 15", "🏆 原始攻擊分 Top 10", "💼 庫存管理"])
     fmt_score = {'收盤':'{:.2f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '攻擊分':'{:.1f}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
 
-    # === Tab 1: 分層精選 + 籌碼分析 ===
+    # === Tab 1: 分層精選 ===
     with tab_strat:
         if not v32_df.empty:
             final_df, stats = get_stratified_selection(v32_df)
             st.info(f"🎯 分層結構：{' | '.join(stats)} (排序依據：攻擊分)")
-            
             if not final_df.empty:
-                # --- 功能區塊 ---
                 st.markdown("#### 🕵️ 籌碼結構偵測")
                 if st.button("🚀 啟動籌碼掃描 (查詢三大法人動向)", key="btn_strat_scan"):
                     with st.spinner("正在連線 FinMind 歷史資料庫..."):
                         chip_df = get_chip_analysis(final_df['代號'].tolist())
-                        # 合併資料
                         if not chip_df.empty:
                             final_df = pd.merge(final_df, chip_df, on='代號', how='left')
                 
-                # 顯示表格
                 cols_to_show = ['代號','名稱','收盤','攻擊分','穩定度','技術分','量能分']
-                if '主力動向' in final_df.columns:
-                    cols_to_show += ['主力動向', '投信(張)', '外資(張)']
+                if '主力動向' in final_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
                 
-                st.dataframe(
-                    final_df[cols_to_show]
-                    .style
-                    .format(fmt_score)
-                    .background_gradient(subset=['攻擊分'], cmap='Reds')
-                    .map(color_stability, subset=['穩定度']), 
-                    hide_index=True, 
-                    use_container_width=True
-                )
-            else:
-                st.warning("無符合條件的一般個股。")
-        else:
-            st.warning("暫無資料")
+                # --- [修復關鍵] 嘗試繪製顏色，失敗則略過，防止當機 ---
+                styler = final_df[cols_to_show].style.format(fmt_score).map(color_stability, subset=['穩定度'])
+                try:
+                    styler = styler.background_gradient(subset=['攻擊分'], cmap='Reds')
+                except Exception:
+                    pass # 忽略 matplotlib 錯誤
+                
+                st.dataframe(styler, hide_index=True, use_container_width=True)
+            else: st.warning("無符合條件的一般個股。")
+        else: st.warning("暫無資料")
 
-    # === Tab 2: Top 10 + 籌碼分析 ===
+    # === Tab 2: Top 10 ===
     with tab_raw:
         st.markdown("### 🏆 全市場攻擊力排行 (Top 10)")
-        st.caption("本排行純粹反映「當日攻擊動能」，不含穩定度加權。")
-        
         if not v32_df.empty:
             raw_df = get_raw_top10(v32_df)
             if not raw_df.empty:
-                # --- 功能區塊 ---
                 st.markdown("#### 🕵️ 籌碼結構偵測")
                 if st.button("🚀 啟動籌碼掃描 (Top 10)", key="btn_raw_scan"):
                     with st.spinner("正在連線 FinMind 歷史資料庫..."):
                         chip_df = get_chip_analysis(raw_df['代號'].tolist())
                         if not chip_df.empty:
                             raw_df = pd.merge(raw_df, chip_df, on='代號', how='left')
-
-                # 顯示表格
+                
                 cols_to_show = ['代號','名稱','收盤','攻擊分','穩定度','技術分','量能分']
-                if '主力動向' in raw_df.columns:
-                    cols_to_show += ['主力動向', '投信(張)', '外資(張)']
+                if '主力動向' in raw_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
 
-                st.dataframe(
-                    raw_df[cols_to_show]
-                    .style
-                    .format(fmt_score)
-                    .background_gradient(subset=['攻擊分'], cmap='Reds')
-                    .map(color_stability, subset=['穩定度']),
-                    hide_index=True, 
-                    use_container_width=True
-                )
-            else:
-                st.info("無資料")
-        else:
-            st.warning("暫無資料")
+                # --- [修復關鍵] 嘗試繪製顏色，失敗則略過 ---
+                styler = raw_df[cols_to_show].style.format(fmt_score).map(color_stability, subset=['穩定度'])
+                try:
+                    styler = styler.background_gradient(subset=['攻擊分'], cmap='Reds')
+                except Exception:
+                    pass
+                
+                st.dataframe(styler, hide_index=True, use_container_width=True)
+            else: st.info("無資料")
+        else: st.warning("暫無資料")
 
-    # === Tab 3: 庫存管理 (新版) ===
+    # === Tab 3: 庫存管理 ===
     with tab_inv:
-        # --- [上] 交易輸入區 ---
         st.subheader("📝 交易登錄")
-        
-        # 使用 Form 來包裹輸入和按鈕
         with st.form("trade_form", clear_on_submit=True):
             col_buy, col_sell = st.columns(2)
-            
             with col_buy:
                 st.markdown("### 🔴 買入")
                 b_code = st.text_input("代號", key="b_code", placeholder="例如: 2330")
                 b_zhang = st.number_input("張數", min_value=0.0, step=1.0, key="b_zhang")
                 b_price = st.number_input("成交均價", min_value=0.0, step=0.1, key="b_price")
-                
             with col_sell:
                 st.markdown("### 🟢 賣出")
                 s_code = st.text_input("代號", key="s_code", placeholder="例如: 2330")
                 s_zhang = st.number_input("張數", min_value=0.0, step=1.0, key="s_zhang")
-                s_price = st.number_input("成交均價", min_value=0.0, step=0.1, key="s_price", help="輸入價格僅供紀錄，賣出將優先扣除庫存數量")
-
-            # --- [中] 儲存按鈕 ---
+                s_price = st.number_input("成交均價", min_value=0.0, step=0.1, key="s_price")
             st.markdown("---")
             submitted = st.form_submit_button("💾 執行交易並儲存", type="primary")
             
             if submitted:
-                # 準備資料
                 buy_data = {'code': b_code, 'zhang': b_zhang, 'price': b_price} if b_code and b_zhang > 0 else None
                 sell_data = {'code': s_code, 'zhang': s_zhang, 'price': s_price} if s_code and s_zhang > 0 else None
-                
                 if buy_data or sell_data:
                     with st.spinner("正在更新雲端庫存..."):
                         update_inventory(buy_data, sell_data)
-                    # 重新整理頁面以顯示最新數據
                     time.sleep(1)
                     st.rerun()
-                else:
-                    st.warning("⚠️ 請至少輸入買入或賣出的資料")
+                else: st.warning("⚠️ 請至少輸入買入或賣出的資料")
 
-        # --- [下] 庫存顯示區 ---
         st.divider()
         st.subheader("💼 我的庫存")
-        
-        # 讀取 Github
         current_holdings = load_holdings()
-        
         if not current_holdings.empty:
             res = []
             score_map = {}
             if not v32_df.empty:
                 score_map = v32_df.set_index('代號')['攻擊分'].to_dict()
-
             progress_bar = st.progress(0)
             total_rows = len(current_holdings)
-            
             for idx, r in current_holdings.iterrows():
                 progress_bar.progress((idx + 1) / total_rows)
-                
                 if not r['股票代號']: continue
                 code = str(r['股票代號'])
                 qty = float(r['持有股數'] or 0)
                 cost = float(r['買入均價'] or 0)
-                
-                curr = 0
-                nm = code
-                sc = 0
-                signal = "⚪ 資料不足"
-                
+                curr = 0; nm = code; sc = 0; signal = "⚪ 資料不足"
                 try:
-                    # 抓即時股價
                     stock = yf.Ticker(f"{code}.TW")
                     h = stock.history(period="1mo") 
                     if not h.empty:
                         curr = h['Close'].iloc[-1]
-                        # 抓 V32 分數
                         if code in score_map:
                             match = v32_df[v32_df['代號'] == code].iloc[0]
-                            nm = match['名稱']
-                            sc = match['攻擊分']
+                            nm = match['名稱']; sc = match['攻擊分']
                         else:
-                            nm = stock.info.get('shortName', code)
-                            sc = 0 
-                        
-                        # 判斷邏輯
+                            nm = stock.info.get('shortName', code); sc = 0 
                         ma20 = h['Close'].rolling(20).mean().iloc[-1]
                         if not np.isnan(ma20) and curr < ma20: signal = "🔴 破線(停損)"
                         elif sc > 0 and sc < 60: signal = "🟡 熄火(停利)"
@@ -549,42 +448,25 @@ def main():
                             else: signal = "🔴 破線(榜外)"
                         else: signal = "🟢 續抱"
                 except Exception as e: pass
-                
-                val = curr * qty
-                c_tot = cost * qty
-                pl = val - c_tot
+                val = curr * qty; c_tot = cost * qty; pl = val - c_tot
                 roi = (pl/c_tot*100) if c_tot>0 else 0
                 score_display = f"{sc:.1f}" if sc > 0 else "N/A"
-                
                 res.append({'代號': code, '名稱': nm, '現價': curr, '成本': cost, '股數': qty, '損益': pl, '報酬率%': roi, '攻擊分': score_display, '建議': signal})
-            
             progress_bar.empty()
-            
             if res:
                 df_res = pd.DataFrame(res)
-                # 總計區塊
                 c1, c2, c3 = st.columns(3)
                 c1.metric("總成本", f"${(df_res['成本']*df_res['股數']).sum():,.0f}")
                 total_pl = df_res['損益'].sum()
                 c2.metric("總損益", f"${total_pl:,.0f}", delta=f"{total_pl:,.0f}")
                 c3.metric("總市值", f"${(df_res['現價']*df_res['股數']).sum():,.0f}")
-                
                 def color_signal(val):
                     if "🔴" in val: return 'color: white; background-color: #d32f2f; font-weight: bold;'
                     if "🟡" in val: return 'color: black; background-color: #fbc02d; font-weight: bold;'
                     if "🟢" in val: return 'color: white; background-color: #388e3c; font-weight: bold;'
                     return ''
-
-                st.dataframe(
-                    df_res.style
-                    .map(color_surplus, subset=['損益','報酬率%'])
-                    .map(color_signal, subset=['建議'])
-                    .format({'現價':'{:.2f}','損益':'{:+,.0f}','報酬率%':'{:+.2f}%', '股數':'{:.0f}'}), 
-                    use_container_width=True, 
-                    hide_index=True
-                )
-        else:
-            st.info("目前無庫存資料，請在上方新增交易。")
+                st.dataframe(df_res.style.map(color_surplus, subset=['損益','報酬率%']).map(color_signal, subset=['建議']).format({'現價':'{:.2f}','損益':'{:+,.0f}','報酬率%':'{:+.2f}%', '股數':'{:.0f}'}), use_container_width=True, hide_index=True)
+        else: st.info("目前無庫存資料，請在上方新增交易。")
 
 if __name__ == "__main__":
     main()
