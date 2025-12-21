@@ -7,3 +7,4 @@ FinMind
 tqdm
 requests
 matplotlib
+
