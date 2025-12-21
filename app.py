@@ -9,6 +9,14 @@ from github import Github
 import time
 from FinMind.data import DataLoader 
 
+# --- [關鍵修復] 預先檢查 matplotlib 是否存在 ---
+# 這樣可以避免在 st.dataframe 渲染時才報錯
+try:
+    import matplotlib
+    HAS_MPL = True
+except ImportError:
+    HAS_MPL = False
+
 # --- 設定頁面資訊 ---
 st.set_page_config(
     page_title="V32 戰情室 (Attack Focus)",
@@ -347,12 +355,10 @@ def main():
                 cols_to_show = ['代號','名稱','收盤','攻擊分','穩定度','技術分','量能分']
                 if '主力動向' in final_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
                 
-                # --- [修復關鍵] 嘗試繪製顏色，失敗則略過，防止當機 ---
+                # --- [修復關鍵] 只有當 HAS_MPL 為真時，才設定漸層 ---
                 styler = final_df[cols_to_show].style.format(fmt_score).map(color_stability, subset=['穩定度'])
-                try:
+                if HAS_MPL:
                     styler = styler.background_gradient(subset=['攻擊分'], cmap='Reds')
-                except Exception:
-                    pass # 忽略 matplotlib 錯誤
                 
                 st.dataframe(styler, hide_index=True, use_container_width=True)
             else: st.warning("無符合條件的一般個股。")
@@ -374,12 +380,10 @@ def main():
                 cols_to_show = ['代號','名稱','收盤','攻擊分','穩定度','技術分','量能分']
                 if '主力動向' in raw_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
 
-                # --- [修復關鍵] 嘗試繪製顏色，失敗則略過 ---
+                # --- [修復關鍵] 只有當 HAS_MPL 為真時，才設定漸層 ---
                 styler = raw_df[cols_to_show].style.format(fmt_score).map(color_stability, subset=['穩定度'])
-                try:
+                if HAS_MPL:
                     styler = styler.background_gradient(subset=['攻擊分'], cmap='Reds')
-                except Exception:
-                    pass
                 
                 st.dataframe(styler, hide_index=True, use_container_width=True)
             else: st.info("無資料")
