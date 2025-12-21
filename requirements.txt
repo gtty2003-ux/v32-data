@@ -6,3 +6,4 @@ PyGithub
 FinMind
 tqdm
 requests
+matplotlib
