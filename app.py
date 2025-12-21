@@ -55,7 +55,7 @@ def color_stability(val):
     except: pass
     return ''
 
-# --- 新增：籌碼分析函數 (使用 FinMind) ---
+# --- 籌碼分析函數 (使用 FinMind) ---
 def get_chip_analysis(symbol_list):
     """
     針對篩選後的清單抓取三大法人資料 (使用 FinMind API)
@@ -141,7 +141,7 @@ def get_chip_analysis(symbol_list):
     status.empty()
     return pd.DataFrame(chip_data)
 
-# --- 核心：V32 指標運算 (維持原樣) ---
+# --- 核心：V32 指標運算 ---
 def calculate_indicators(hist):
     if len(hist) < 65: return 0, 0, 0, "0/5"
     close = hist['Close']
@@ -188,18 +188,18 @@ def calculate_indicators(hist):
         o_now = open_p.iloc[i]
 
         t_score = 60
-        if not np.isnan(ma20) and c_now > ma20: t_score += 5         
-        if not np.isnan(ma20) and not np.isnan(ma20_prev) and ma20 > ma20_prev: t_score += 5     
+        if not np.isnan(ma20) and c_now > ma20: t_score += 5          
+        if not np.isnan(ma20) and not np.isnan(ma20_prev) and ma20 > ma20_prev: t_score += 5      
         if not np.isnan(ma5) and not np.isnan(ma20) and not np.isnan(ma60):
             if ma5 > ma20 and ma20 > ma60: t_score += 10 
-        if not np.isnan(rsi_now) and rsi_now > 50: t_score += 5         
-        if not np.isnan(rsi_now) and rsi_now > 70: t_score += 5         
-        if not np.isnan(macd_now) and not np.isnan(sig_now) and macd_now > sig_now: t_score += 5   
+        if not np.isnan(rsi_now) and rsi_now > 50: t_score += 5          
+        if not np.isnan(rsi_now) and rsi_now > 70: t_score += 5          
+        if not np.isnan(macd_now) and not np.isnan(sig_now) and macd_now > sig_now: t_score += 5    
         if not np.isnan(high_20_prev) and c_now > high_20_prev: t_score += 10 
 
         v_score = 60
         if not np.isnan(v_ma20) and v_now > v_ma20: v_score += 10      
-        if not np.isnan(v_ma5) and v_now > v_ma5: v_score += 10       
+        if not np.isnan(v_ma5) and v_now > v_ma5: v_score += 10        
         is_red = c_now > o_now
         vol_increase = v_now > v_prev
         if is_red and vol_increase: v_score += 15 
@@ -288,12 +288,68 @@ def save_holdings(df):
         try:
             contents = repo.get_contents(FILE_PATH)
             repo.update_file(contents.path, f"Update {get_taiwan_time()}", csv_content, contents.sha)
-            st.success("✅ 儲存成功！")
+            st.success("✅ 交易已儲存至雲端！")
         except:
             repo.create_file(FILE_PATH, "Create holdings.csv", csv_content)
             st.success("✅ 建立並儲存成功！")
     except Exception as e:
         st.error(f"❌ 儲存失敗: {e}")
+
+# --- 新增：庫存更新邏輯 (取代舊的 Editor 邏輯) ---
+def update_inventory(buy_data, sell_data):
+    """
+    buy_data: {'code': str, 'zhang': float, 'price': float} or None
+    sell_data: {'code': str, 'zhang': float, 'price': float} or None
+    """
+    df = load_holdings()
+    
+    # 處理買入
+    if buy_data and buy_data['code']:
+        code = buy_data['code']
+        # 轉成股數 (1張 = 1000股)
+        qty_add = buy_data['zhang'] * 1000
+        price_in = buy_data['price']
+        
+        if code in df['股票代號'].values:
+            # 既有庫存：計算加權平均
+            idx = df[df['股票代號'] == code].index[0]
+            old_qty = df.at[idx, '持有股數']
+            old_cost = df.at[idx, '買入均價']
+            
+            new_qty = old_qty + qty_add
+            # 避免除以零
+            if new_qty > 0:
+                new_cost = ((old_qty * old_cost) + (qty_add * price_in)) / new_qty
+            else:
+                new_cost = price_in
+            
+            df.at[idx, '持有股數'] = new_qty
+            df.at[idx, '買入均價'] = new_cost
+        else:
+            # 新庫存：直接新增
+            new_row = pd.DataFrame({'股票代號': [code], '買入均價': [price_in], '持有股數': [qty_add]})
+            df = pd.concat([df, new_row], ignore_index=True)
+
+    # 處理賣出
+    if sell_data and sell_data['code']:
+        code = sell_data['code']
+        qty_sell = sell_data['zhang'] * 1000
+        # 賣出價格這裡主要用於記錄，但在純庫存表，賣出主要是扣數量，不影響剩餘庫存單位成本
+        
+        if code in df['股票代號'].values:
+            idx = df[df['股票代號'] == code].index[0]
+            current_qty = df.at[idx, '持有股數']
+            new_qty = current_qty - qty_sell
+            
+            if new_qty <= 0:
+                # 出清，刪除該列
+                df = df.drop(idx)
+            else:
+                # 減碼
+                df.at[idx, '持有股數'] = new_qty
+    
+    # 儲存
+    save_holdings(df)
 
 # --- 篩選與排序邏輯 ---
 def get_stratified_selection(df):
@@ -338,7 +394,7 @@ def main():
             st.info(f"🎯 分層結構：{' | '.join(stats)} (排序依據：攻擊分)")
             
             if not final_df.empty:
-                # --- 新增功能區塊 ---
+                # --- 功能區塊 ---
                 st.markdown("#### 🕵️ 籌碼結構偵測")
                 if st.button("🚀 啟動籌碼掃描 (查詢三大法人動向)", key="btn_strat_scan"):
                     with st.spinner("正在連線 FinMind 歷史資料庫..."):
@@ -366,7 +422,7 @@ def main():
         else:
             st.warning("暫無資料")
 
-    # === Tab 2: Top 10 + 籌碼分析 (已更新) ===
+    # === Tab 2: Top 10 + 籌碼分析 ===
     with tab_raw:
         st.markdown("### 🏆 全市場攻擊力排行 (Top 10)")
         st.caption("本排行純粹反映「當日攻擊動能」，不含穩定度加權。")
@@ -374,7 +430,7 @@ def main():
         if not v32_df.empty:
             raw_df = get_raw_top10(v32_df)
             if not raw_df.empty:
-                # --- 新增功能區塊 ---
+                # --- 功能區塊 ---
                 st.markdown("#### 🕵️ 籌碼結構偵測")
                 if st.button("🚀 啟動籌碼掃描 (Top 10)", key="btn_raw_scan"):
                     with st.spinner("正在連線 FinMind 歷史資料庫..."):
@@ -401,37 +457,64 @@ def main():
         else:
             st.warning("暫無資料")
 
-    # === Tab 3: 庫存管理 (維持原樣) ===
+    # === Tab 3: 庫存管理 (新版) ===
     with tab_inv:
-        st.subheader("📝 庫存編輯器")
-        if 'editor_data' not in st.session_state:
-            st.session_state['editor_data'] = load_holdings()
+        # --- [上] 交易輸入區 ---
+        st.subheader("📝 交易登錄")
+        
+        # 使用 Form 來包裹輸入和按鈕
+        with st.form("trade_form", clear_on_submit=True):
+            col_buy, col_sell = st.columns(2)
             
-        edited = st.data_editor(
-            st.session_state['editor_data'],
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "股票代號": st.column_config.TextColumn("代號", required=True),
-                "買入均價": st.column_config.NumberColumn("均價", format="%.2f"),
-                "持有股數": st.column_config.NumberColumn("股數", step=1000)
-            }, key="inv_editor"
-        )
-        if st.button("💾 儲存變更"):
-            save_holdings(edited)
-            st.rerun()
-        
+            with col_buy:
+                st.markdown("### 🔴 買入")
+                b_code = st.text_input("代號", key="b_code", placeholder="例如: 2330")
+                b_zhang = st.number_input("張數", min_value=0.0, step=1.0, key="b_zhang")
+                b_price = st.number_input("成交均價", min_value=0.0, step=0.1, key="b_price")
+                
+            with col_sell:
+                st.markdown("### 🟢 賣出")
+                s_code = st.text_input("代號", key="s_code", placeholder="例如: 2330")
+                s_zhang = st.number_input("張數", min_value=0.0, step=1.0, key="s_zhang")
+                s_price = st.number_input("成交均價", min_value=0.0, step=0.1, key="s_price", help="輸入價格僅供紀錄，賣出將優先扣除庫存數量")
+
+            # --- [中] 儲存按鈕 ---
+            st.markdown("---")
+            submitted = st.form_submit_button("💾 執行交易並儲存", type="primary")
+            
+            if submitted:
+                # 準備資料
+                buy_data = {'code': b_code, 'zhang': b_zhang, 'price': b_price} if b_code and b_zhang > 0 else None
+                sell_data = {'code': s_code, 'zhang': s_zhang, 'price': s_price} if s_code and s_zhang > 0 else None
+                
+                if buy_data or sell_data:
+                    with st.spinner("正在更新雲端庫存..."):
+                        update_inventory(buy_data, sell_data)
+                    # 重新整理頁面以顯示最新數據
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.warning("⚠️ 請至少輸入買入或賣出的資料")
+
+        # --- [下] 庫存顯示區 ---
         st.divider()
+        st.subheader("💼 我的庫存")
         
-        if not edited.empty:
+        # 讀取 Github
+        current_holdings = load_holdings()
+        
+        if not current_holdings.empty:
             res = []
             score_map = {}
             if not v32_df.empty:
                 score_map = v32_df.set_index('代號')['攻擊分'].to_dict()
 
-            progress_text = st.empty()
+            progress_bar = st.progress(0)
+            total_rows = len(current_holdings)
             
-            for idx, r in edited.iterrows():
+            for idx, r in current_holdings.iterrows():
+                progress_bar.progress((idx + 1) / total_rows)
+                
                 if not r['股票代號']: continue
                 code = str(r['股票代號'])
                 qty = float(r['持有股數'] or 0)
@@ -443,10 +526,12 @@ def main():
                 signal = "⚪ 資料不足"
                 
                 try:
+                    # 抓即時股價
                     stock = yf.Ticker(f"{code}.TW")
                     h = stock.history(period="1mo") 
                     if not h.empty:
                         curr = h['Close'].iloc[-1]
+                        # 抓 V32 分數
                         if code in score_map:
                             match = v32_df[v32_df['代號'] == code].iloc[0]
                             nm = match['名稱']
@@ -455,6 +540,7 @@ def main():
                             nm = stock.info.get('shortName', code)
                             sc = 0 
                         
+                        # 判斷邏輯
                         ma20 = h['Close'].rolling(20).mean().iloc[-1]
                         if not np.isnan(ma20) and curr < ma20: signal = "🔴 破線(停損)"
                         elif sc > 0 and sc < 60: signal = "🟡 熄火(停利)"
@@ -472,9 +558,11 @@ def main():
                 
                 res.append({'代號': code, '名稱': nm, '現價': curr, '成本': cost, '股數': qty, '損益': pl, '報酬率%': roi, '攻擊分': score_display, '建議': signal})
             
-            progress_text.empty()
+            progress_bar.empty()
+            
             if res:
                 df_res = pd.DataFrame(res)
+                # 總計區塊
                 c1, c2, c3 = st.columns(3)
                 c1.metric("總成本", f"${(df_res['成本']*df_res['股數']).sum():,.0f}")
                 total_pl = df_res['損益'].sum()
@@ -491,10 +579,12 @@ def main():
                     df_res.style
                     .map(color_surplus, subset=['損益','報酬率%'])
                     .map(color_signal, subset=['建議'])
-                    .format({'現價':'{:.2f}','損益':'{:+,.0f}','報酬率%':'{:+.2f}%'}), 
+                    .format({'現價':'{:.2f}','損益':'{:+,.0f}','報酬率%':'{:+.2f}%', '股數':'{:.0f}'}), 
                     use_container_width=True, 
                     hide_index=True
                 )
+        else:
+            st.info("目前無庫存資料，請在上方新增交易。")
 
 if __name__ == "__main__":
     main()
