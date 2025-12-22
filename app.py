@@ -78,7 +78,6 @@ def load_data_from_github():
             return df
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"讀取資料錯誤: {e}")
         return pd.DataFrame()
 
 # --- V32 運算邏輯 ---
@@ -117,21 +116,21 @@ def calculate_v32_score(df_group):
     if c_now > open_p.iloc[i] and v_now > vol.iloc[i-1]: v_score += 15
     if v_now > vol_ma20.iloc[i] * 1.5: v_score += 5
     
-    return {'技術分': min(100, t_score), '量能分': min(100, v_score), '攻擊分': (min(100, t_score) * 0.7) + (min(100, v_score) * 0.3), '收盤': c_now, '歷史最高': high.max()}
+    return {'技術分': min(100, t_score), '量能分': min(100, v_score), '攻擊分': (min(100, t_score) * 0.7) + (min(100, v_score) * 0.3), '收盤': c_now}
 
 @st.cache_data(ttl=1800)
 def process_data():
     raw_df = load_data_from_github()
-    if raw_df.empty: return pd.DataFrame(), "無法讀取數據"
+    if raw_df.empty: return pd.DataFrame(), pd.DataFrame(), "無法讀取數據"
     results = []
     for code, group in raw_df.groupby('Code'):
         res = calculate_v32_score(group)
         if res:
             res.update({'代號': code, '名稱': group['Name'].iloc[-1]})
             results.append(res)
-    return pd.DataFrame(results), None
+    return pd.DataFrame(results), raw_df, None
 
-# --- 即時報價 (修正版) ---
+# --- 即時報價 (修正抓取邏輯) ---
 @st.cache_data(ttl=60)
 def get_realtime_quotes(code_list):
     if not code_list: return {}
@@ -209,7 +208,7 @@ def save_holdings(df):
         repo.update_file(contents.path, f"Update {get_taiwan_time()}", csv_content, contents.sha)
     except: pass
 
-# --- Tab 1 & Tab 2 使用的渲染函式 ---
+# --- Tab 1 & 2 表格渲染 ---
 def display_v32_tables(df, price_limit, suffix):
     filtered = df[(df['收盤'] <= price_limit) & (df['攻擊分'] >= 86) & (df['攻擊分'] <= 92)].sort_values('攻擊分', ascending=False)
     if filtered.empty: return st.warning("無符合標的")
@@ -226,7 +225,6 @@ def display_v32_tables(df, price_limit, suffix):
     filtered = merge_realtime_data(filtered)
     base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
     if '主力動向' in filtered.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
-    
     fmt = {'即時價':'{:.2f}', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
 
     for title, score_range in [
@@ -237,13 +235,7 @@ def display_v32_tables(df, price_limit, suffix):
         st.subheader(title)
         sub = filtered[(filtered['攻擊分'] >= score_range[0]) & (filtered['攻擊分'] <= score_range[1])].head(10)
         if not sub.empty:
-            st.dataframe(
-                sub[base_cols].style.format(fmt)
-                .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=86, vmax=92)
-                .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=60, vmax=100)
-                .background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=60, vmax=100),
-                hide_index=True, use_container_width=True
-            )
+            st.dataframe(sub[base_cols].style.format(fmt).background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=86, vmax=92).background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=60, vmax=100).background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=60, vmax=100), hide_index=True, use_container_width=True)
         else: st.caption("暫無標的")
         st.divider()
 
@@ -253,25 +245,54 @@ def main():
     if 'inventory' not in st.session_state: st.session_state['inventory'] = load_holdings()
     
     with st.spinner("讀取核心資料..."):
-        v32_df, err = process_data()
+        v32_df, raw_df, err = process_data()
     
     tab_80, tab_50, tab_inv = st.tabs(["💰 80元以下推薦", "🪙 50元以下推薦", "💼 庫存管理"])
 
     with tab_80:
-        if not v32_df.empty:
-            display_v32_tables(v32_df.copy(), 80, "80")
+        if not v32_df.empty: display_v32_tables(v32_df.copy(), 80, "80")
 
     with tab_50:
-        if not v32_df.empty:
-            display_v32_tables(v32_df.copy(), 50, "50")
+        if not v32_df.empty: display_v32_tables(v32_df.copy(), 50, "50")
 
-    # --- Tab 3 持股監控區 (修正版) ---
+    with tab_inv:
+        st.subheader("📝 庫存交易管理")
+        name_map = dict(zip(v32_df['代號'], v32_df['名稱'])) if not v32_df.empty else {}
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("##### 📥 **買入**")
+            edited_buy = st.data_editor(pd.DataFrame([{"股票代號": "", "持有股數": 1000, "買入均價": 0.0}]), num_rows="dynamic", key="buy_in", hide_index=True)
+        with c2:
+            st.markdown("##### 📤 **賣出**")
+            edited_sell = st.data_editor(pd.DataFrame([{"股票代號": "", "持有股數": 1000}]), num_rows="dynamic", key="sell_out", hide_index=True)
+        
+        if st.button("💾 執行交易", type="primary"):
+            inv = st.session_state['inventory'].copy()
+            for _, r in edited_buy.iterrows():
+                code = str(r['股票代號']).strip().split('.')[0]
+                if code and r['持有股數'] > 0:
+                    match = inv[inv['股票代號'] == code]
+                    if not match.empty:
+                        idx = match.index[0]
+                        total_shares = inv.at[idx, '持有股數'] + r['持有股數']
+                        inv.at[idx, '買入均價'] = round(((inv.at[idx, '買入均價'] * inv.at[idx, '持有股數']) + (r['買入均價'] * r['持有股數'])) / total_shares, 2)
+                        inv.at[idx, '持有股數'] = total_shares
+                    else:
+                        inv = pd.concat([inv, pd.DataFrame([{'股票代號': code, '持有股數': r['持有股數'], '買入均價': r['買入均價']}])], ignore_index=True)
+            for _, r in edited_sell.iterrows():
+                code = str(r['股票代號']).strip().split('.')[0]
+                if code:
+                    inv = inv[~((inv['股票代號'] == code) & (inv['持有股數'] <= r['持有股數']))]
+                    mask = inv['股票代號'] == code
+                    if mask.any(): inv.loc[mask, '持有股數'] -= r['持有股數']
+            st.session_state['inventory'] = inv
+            save_holdings(inv)
+            st.rerun()
+
+        st.divider()
         if not st.session_state['inventory'].empty:
             inv_df = st.session_state['inventory'].copy()
             inv_rt = get_realtime_quotes(inv_df['股票代號'].tolist())
-            
-            # 獲取計算分數與歷史資料所需的原始 DataFrame
-            # 假設原始資料存在 raw_df 中 (process_data 讀取的)
             score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
             
             res = []
@@ -281,27 +302,21 @@ def main():
                 buy_price = r['買入均價']
                 qty = r['持有股數']
                 
-                # 取得該股歷史高點清單 (來自核心資料 raw_df)
-                # 我們只抓取大於等於買入價的高點，來模擬「買入後的高點」
-                if 'raw_df' in locals() or 'raw_df' in globals():
-                    hist = raw_df[raw_df['Code'] == code]['HighestPrice'].tolist()
-                    wave_high = max([h for h in hist if h >= buy_price] + [curr])
-                else:
-                    wave_high = curr # 若無資料則以現價為高點
+                # --- 核心邏輯：從買入後起算的高點 ---
+                hist_highs = raw_df[raw_df['Code'] == code]['HighestPrice'].tolist()
+                # 只抓取股價大於買入價之後的高點，模擬「買入後波段高點」
+                wave_high = max([h for h in hist_highs if h >= buy_price] + [curr])
                 
                 pl = (curr - buy_price) * qty
                 roi = (pl / (buy_price * qty) * 100) if buy_price > 0 else 0
                 sc = score_map.get(code, 0)
                 
-                # --- 建議操作判定 ---
+                # 建議操作判斷
                 if curr > buy_price and curr < (wave_high * 0.9):
                     action = "💰 停利 (回落10%)"
-                elif roi < -10:
-                    action = "🛑 停損"
-                elif sc >= 60:
-                    action = "🟢 續抱"
-                else:
-                    action = "🔻 賣出"
+                elif roi < -10: action = "🛑 停損"
+                elif sc >= 60: action = "🟢 續抱"
+                else: action = "🔻 賣出"
 
                 res.append({
                     '代號': code, '名稱': name_map.get(code, code), 
@@ -310,7 +325,20 @@ def main():
                     '攻擊分': sc, '建議操作': action
                 })
             
-            # (下方 DataFrame 渲染部分維持原樣...)
+            df_res = pd.DataFrame(res)
+            c1, c2, c3 = st.columns(3)
+            c1.metric("總成本", f"${(df_res['買入均價']*(inv_df['持有股數'])).sum():,.0f}")
+            c2.metric("總損益", f"${df_res['損益'].sum():,.0f}", delta=f"{df_res['損益'].sum():,.0f}")
+            c3.metric("總市值", f"${(df_res['即時價']*(inv_df['持有股數'])).sum():,.0f}")
+            
+            st.dataframe(
+                df_res[['代號', '名稱', '持有張數', '買入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
+                .format({'買入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.1f}'})
+                .map(color_surplus, subset=['損益','報酬率%'])
+                .map(color_action, subset=['建議操作']), 
+                use_container_width=True, hide_index=True
+            )
+        else: st.info("目前無庫存。")
 
 if __name__ == "__main__":
     main()
