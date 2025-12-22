@@ -93,7 +93,8 @@ def get_realtime_quotes(code_list):
                 for stock in stocks:
                     if stock['success']:
                         code = stock['info']['code']
-                        name = stock['info'].get('name', code) # 嘗試抓取名稱
+                        # 這裡的名稱只是備用，稍後會用雲端資料覆蓋
+                        name = stock['info'].get('name', code) 
                         
                         price_str = stock['realtime'].get('latest_trade_price', '-')
                         if price_str == '-' or not price_str:
@@ -127,7 +128,6 @@ def get_realtime_quotes(code_list):
             for code in missing_codes:
                 try:
                     ticker = tickers.tickers[f"{code}.TW"]
-                    # Yahoo fast_info 通常沒有中文名稱，這裡暫時用代號，後續邏輯會嘗試補全
                     name = code 
                     price = ticker.fast_info.last_price
                     prev_close = ticker.fast_info.previous_close
@@ -158,6 +158,25 @@ def merge_realtime_data(df):
     df['漲跌幅%'] = df['漲跌幅%'].fillna(0)
     df['當日量'] = df['當日量'].fillna(0)
     return df
+
+# --- 專門抓取雲端名稱對照表 (新功能) ---
+@st.cache_data(ttl=3600)
+def load_name_map_from_cloud():
+    """從 GitHub 下載 v32_recommend.csv 並建立 代號->名稱 的對照表"""
+    url = f"https://raw.githubusercontent.com/{REPO_KEY}/main/v32_recommend.csv"
+    try:
+        df = pd.read_csv(url)
+        # 尋找正確的欄位名稱
+        code_col = next((c for c in ['代碼', '代號', 'Code', 'Symbol'] if c in df.columns), None)
+        name_col = next((c for c in ['名稱', 'Name', 'StockName'] if c in df.columns), None)
+        
+        if code_col and name_col:
+            df[code_col] = df[code_col].astype(str).str.strip()
+            df[name_col] = df[name_col].astype(str).str.strip()
+            return dict(zip(df[code_col], df[name_col]))
+        return {}
+    except:
+        return {}
 
 # --- FinMind 籌碼分析 ---
 def get_chip_analysis(symbol_list):
@@ -438,6 +457,10 @@ def main():
     # === Tab 3: 庫存管理 ===
     with tab_inv:
         st.subheader("📝 庫存交易管理")
+        
+        # 載入雲端名稱對照表 (確保名稱正確)
+        cloud_name_map = load_name_map_from_cloud()
+        
         input_key = st.session_state['input_key_counter']
         st.markdown("##### 📥 **買入登記 (Buy)** - 自動計算加權平均成本")
         df_buy_in = pd.DataFrame([{"股票代號": "", "持有股數": 1000, "買入均價": 0.0}])
@@ -501,18 +524,11 @@ def main():
                 qty = float(r['持有股數'] or 0)
                 cost = float(r['買入均價'] or 0)
                 
-                # 取得即時資訊與名稱
                 rt_info = inv_rt.get(code, {})
                 curr = rt_info.get('即時價', 0)
                 
-                # 名稱查找順序：即時盤 > V32列表 > 代號
-                name = rt_info.get('名稱', '')
-                if not name:
-                    v32_match = v32_df[v32_df['代號'] == code]
-                    if not v32_match.empty:
-                        name = v32_match.iloc[0]['名稱']
-                    else:
-                        name = code
+                # 名稱邏輯: 優先查雲端 -> 其次即時盤 -> 最後顯示代號
+                name = cloud_name_map.get(code, rt_info.get('名稱', code))
                 
                 sc = score_map.get(code, 0)
                 val = curr * qty
@@ -526,7 +542,7 @@ def main():
                 
                 res.append({
                     '代號': code,
-                    '名稱': name, # 新增名稱欄位
+                    '名稱': name,
                     '即時價': curr, 
                     '損益': pl, 
                     '報酬率%': roi, 
