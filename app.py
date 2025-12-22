@@ -68,26 +68,6 @@ def color_change(val):
     elif val < 0: return 'color: #388e3c; background-color: rgba(0,255,0,0.1); font-weight: bold;'
     return 'color: gray'
 
-# 新增：分數文字顏色階層 (70-100 越紅)
-def color_score_text(val):
-    if not isinstance(val, (int, float)): return ''
-    
-    # 70分以下顯示黑色(或淡化)
-    if val < 70:
-        return 'color: rgba(0,0,0,0.5);' 
-    
-    # 70-100 分數越高，紅色越深/越鮮豔
-    if val >= 95:
-        return 'color: #b71c1c; font-weight: 900;' # 深紅 (最强)
-    elif val >= 90:
-        return 'color: #d32f2f; font-weight: 800;' # 標準紅
-    elif val >= 80:
-        return 'color: #f44336; font-weight: 700;' # 亮紅
-    elif val >= 70:
-        return 'color: #e57373; font-weight: 600;' # 淡紅
-    
-    return 'color: black'
-
 # --- 核心防鎖機制：即時報價抓取 (含雙重備援) ---
 @st.cache_data(ttl=60) # 嚴格執行 60 秒限制，保護 IP
 def get_realtime_quotes(code_list):
@@ -529,9 +509,10 @@ def main():
                 st.dataframe(
                     raw_df[cols_to_show].style
                     .format(fmt_score)
-                    .background_gradient(subset=['攻擊分'], cmap='Reds')
-                    # 新增：套用文字紅色階層邏輯 (70-100 越紅)
-                    .map(color_score_text, subset=['技術分', '量能分']), 
+                    # 恢復背景色塊，但改用較柔和的色階
+                    .background_gradient(subset=['攻擊分'], cmap='OrRd') # 橘紅系 (比 Reds 柔和)
+                    .background_gradient(subset=['技術分'], cmap='PuBu') # 淺藍系 (比 Blues 柔和)
+                    .background_gradient(subset=['量能分'], cmap='YlGn'), # 黃綠系 (比 Greens 柔和)
                     hide_index=True,
                     use_container_width=True
                 )
