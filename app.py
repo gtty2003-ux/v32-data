@@ -184,12 +184,11 @@ def get_realtime_quotes(code_list):
     if missing:
         try:
             yf_codes = [f"{c}.TW" for c in missing]
-            tickers = yf.Tickers(" ".join(yf_codes))
+            tickers = yf.Download(yf_codes, period="1d", interval="1m", progress=False)
             for c in missing:
                 try:
-                    t = tickers.tickers[f"{c}.TW"]
-                    p = t.fast_info.last_price
-                    if p and p > 0: realtime_data[c] = {'名稱': c, '即時價': p, '來源': 'Yahoo'}
+                    price = tickers['Close'][f"{c}.TW"].iloc[-1]
+                    if price and price > 0: realtime_data[c] = {'名稱': c, '即時價': price, '來源': 'Yahoo'}
                 except: continue
         except: pass
     return realtime_data
@@ -263,7 +262,6 @@ def get_stratified_selection(df, price_limit):
     cols = ['攻擊分', '技術分', '量能分', '收盤']
     for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
     
-    # 篩選條件：股價 <= 指定上限, 分數 86~92
     mask = (df['技術分'] >= 60) & (df['量能分'] >= 60) & \
            (df['收盤'] <= price_limit) & \
            (df['攻擊分'] >= 86) & (df['攻擊分'] <= 92)
@@ -302,11 +300,12 @@ def display_graded_tables(filtered_df, key_suffix):
     ]:
         st.subheader(title)
         if not df_sub.empty:
+            # 修正顏色部分：統一設定 vmin 與 vmax 確保 A 區顏色與 S 區一致
             st.dataframe(
                 df_sub[base_cols].style.format(fmt_score)
-                .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red)
-                .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue)
-                .background_gradient(subset=['量能分'], cmap=cmap_pastel_green),
+                .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=86, vmax=92)
+                .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=60, vmax=100)
+                .background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=60, vmax=100),
                 hide_index=True, use_container_width=True
             )
         else: st.caption("暫無標的")
@@ -364,7 +363,6 @@ def main():
         if st.button("💾 執行交易", type="primary"):
             current_inv = st.session_state['inventory'].copy()
             has_update = False
-            # 簡化交易邏輯
             for _, r in edited_buy.iterrows():
                 if r['股票代號'] and r['持有股數'] > 0:
                     code, shares, price = str(r['股票代號']).strip(), int(r['持有股數']), float(r['買入均價'])
@@ -400,17 +398,36 @@ def main():
             
             for _, r in inv_df.iterrows():
                 code, qty, cost = str(r['股票代號']), float(r['持有股數']), float(r['買入均價'])
-                curr = inv_rt.get(code, {}).get('即時價', cost) # 無報價則用成本算
+                curr = inv_rt.get(code, {}).get('即時價', cost) 
                 name = name_map.get(code, code)
+                sc = score_map.get(code, 0)
                 pl = (curr - cost) * qty
-                res.append({'代號': code, '名稱': name, '即時價': curr, '損益': pl, '報酬率%': (pl/(cost*qty)*100) if cost else 0, '攻擊分': score_map.get(code, 0), '持有股數': qty, '購入均價': cost})
+                roi = (pl/(cost*qty)*100) if (cost*qty) > 0 else 0
+                
+                # 修正點：補回建議操作邏輯
+                if roi < -10: action = "🛑 停損"
+                elif sc >= 60: action = "🟢 續抱"
+                else: action = "🔻 賣出"
+
+                res.append({
+                    '代號': code, '名稱': name, '持有股數': qty, '購入均價': cost,
+                    '即時價': curr, '損益': pl, '報酬率%': roi, '攻擊分': sc, '建議操作': action
+                })
             
             df_res = pd.DataFrame(res)
             c1, c2, c3 = st.columns(3)
             c1.metric("總成本", f"${(df_res['購入均價']*df_res['持有股數']).sum():,.0f}")
             c2.metric("總損益", f"${df_res['損益'].sum():,.0f}", delta=f"{df_res['損益'].sum():,.0f}")
             c3.metric("總市值", f"${(df_res['即時價']*df_res['持有股數']).sum():,.0f}")
-            st.dataframe(df_res.style.format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'}).map(color_surplus, subset=['損益','報酬率%']), use_container_width=True, hide_index=True)
+            
+            # 渲染庫存表格
+            st.dataframe(
+                df_res[['代號', '名稱', '持有股數', '購入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
+                .format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
+                .map(color_surplus, subset=['損益','報酬率%'])
+                .map(color_action, subset=['建議操作']), 
+                use_container_width=True, hide_index=True
+            )
         else: st.info("目前無庫存")
 
 if __name__ == "__main__":
