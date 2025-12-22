@@ -9,7 +9,7 @@ from github import Github
 import time
 from FinMind.data import DataLoader
 import twstock
-import matplotlib.colors as mcolors # 新增：用於製作自定義淡色階
+import matplotlib.colors as mcolors
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
@@ -46,10 +46,9 @@ FILE_PATH = "holdings.csv"
 def make_pastel_cmap(hex_color):
     return mcolors.LinearSegmentedColormap.from_list("pastel_cmap", ["#ffffff", hex_color])
 
-# 定義三種極淡色階 (最高分只會到這些粉嫩色，不會變深黑)
-cmap_pastel_red   = make_pastel_cmap("#ef9a9a") # 粉紅 (Material Red 200)
-cmap_pastel_blue  = make_pastel_cmap("#90caf9") # 粉藍 (Material Blue 200)
-cmap_pastel_green = make_pastel_cmap("#a5d6a7") # 粉綠 (Material Green 200)
+cmap_pastel_red   = make_pastel_cmap("#ef9a9a")
+cmap_pastel_blue  = make_pastel_cmap("#90caf9")
+cmap_pastel_green = make_pastel_cmap("#a5d6a7")
 
 # --- 工具函數 ---
 def get_taiwan_time():
@@ -59,8 +58,8 @@ def get_taiwan_time():
 
 def color_surplus(val):
     if not isinstance(val, (int, float)): return ''
-    if val > 0: return 'color: #d32f2f; font-weight: bold;' # 紅
-    elif val < 0: return 'color: #388e3c; font-weight: bold;' # 綠
+    if val > 0: return 'color: #d32f2f; font-weight: bold;'
+    elif val < 0: return 'color: #388e3c; font-weight: bold;'
     return 'color: black'
 
 def color_action(val):
@@ -94,14 +93,14 @@ def get_realtime_quotes(code_list):
                 for stock in stocks:
                     if stock['success']:
                         code = stock['info']['code']
+                        name = stock['info'].get('name', code) # 嘗試抓取名稱
+                        
                         price_str = stock['realtime'].get('latest_trade_price', '-')
                         if price_str == '-' or not price_str:
                             price_str = stock['realtime'].get('best_bid_price', ['-'])[0]
                         last_close = float(stock['info']['last_price']) if stock['info']['last_price'] != '-' else 0.0
-                        try:
-                            current_price = float(price_str)
-                        except:
-                            current_price = 0.0
+                        try: current_price = float(price_str)
+                        except: current_price = 0.0
                         
                         vol_str = stock['realtime'].get('accumulate_trade_volume', '0')
                         try: volume = int(vol_str)
@@ -110,6 +109,7 @@ def get_realtime_quotes(code_list):
                         if current_price > 0:
                             change_pct = ((current_price - last_close) / last_close) * 100 if last_close > 0 else 0
                             realtime_data[code] = {
+                                '名稱': name,
                                 '即時價': current_price,
                                 '漲跌幅%': change_pct,
                                 '當日量': volume,
@@ -127,6 +127,8 @@ def get_realtime_quotes(code_list):
             for code in missing_codes:
                 try:
                     ticker = tickers.tickers[f"{code}.TW"]
+                    # Yahoo fast_info 通常沒有中文名稱，這裡暫時用代號，後續邏輯會嘗試補全
+                    name = code 
                     price = ticker.fast_info.last_price
                     prev_close = ticker.fast_info.previous_close
                     try: volume = ticker.fast_info.last_volume
@@ -134,6 +136,7 @@ def get_realtime_quotes(code_list):
                     if price and price > 0:
                         change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0
                         realtime_data[code] = {
+                            '名稱': name,
                             '即時價': price,
                             '漲跌幅%': change_pct,
                             '當日量': volume,
@@ -375,7 +378,7 @@ def main():
     tab_strat, tab_raw, tab_inv = st.tabs(["🎯 今日攻擊力 Top 15", "🏆 原始攻擊分 Top 10", "💼 庫存管理"])
     fmt_score = {'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '當日量':'{:,}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
 
-    # === Tab 1: 分層精選 (已同步調整) ===
+    # === Tab 1: 分層精選 ===
     with tab_strat:
         if not v32_df.empty:
             final_df, stats = get_stratified_selection(v32_df)
@@ -391,14 +394,12 @@ def main():
                         if not chip_df.empty: final_df = pd.merge(final_df, chip_df, on='代號', how='left')
 
                 final_df = final_df.sort_values(['攻擊分', '漲跌幅%'], ascending=[False, False])
-                # 欄位同步：移除漲跌幅、當日量；新增技術分、量能分
                 cols_to_show = ['代號','名稱','即時價','技術分','量能分','攻擊分','穩定度']
                 if '主力動向' in final_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
                 
                 st.dataframe(
                     final_df[cols_to_show].style
                     .format(fmt_score)
-                    # 套用極淡色階 (Pastel Colors)
                     .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red)
                     .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue)
                     .background_gradient(subset=['量能分'], cmap=cmap_pastel_green)
@@ -409,7 +410,7 @@ def main():
             else: st.warning("無符合條件標的")
         else: st.warning("暫無資料")
 
-    # === Tab 2: Top 10 (已同步調整) ===
+    # === Tab 2: Top 10 ===
     with tab_raw:
         st.markdown("### 🏆 全市場攻擊力排行 (Top 10)")
         if not v32_df.empty:
@@ -421,14 +422,12 @@ def main():
                         chip_df = get_chip_analysis(raw_df['代號'].tolist())
                         if not chip_df.empty: raw_df = pd.merge(raw_df, chip_df, on='代號', how='left')
 
-                # 欄位同步
                 cols_to_show = ['代號','名稱','即時價','技術分','量能分','攻擊分','穩定度']
                 if '主力動向' in raw_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
 
                 st.dataframe(
                     raw_df[cols_to_show].style
                     .format(fmt_score)
-                    # 套用極淡色階
                     .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red)
                     .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue)
                     .background_gradient(subset=['量能分'], cmap=cmap_pastel_green),
@@ -495,21 +494,48 @@ def main():
             inv_rt = get_realtime_quotes(inv_codes) 
             res = []
             score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
+            
             for idx, r in inv_df.iterrows():
                 code = str(r['股票代號'])
                 if not code: continue
                 qty = float(r['持有股數'] or 0)
                 cost = float(r['買入均價'] or 0)
-                curr = inv_rt.get(code, {}).get('即時價', 0)
+                
+                # 取得即時資訊與名稱
+                rt_info = inv_rt.get(code, {})
+                curr = rt_info.get('即時價', 0)
+                
+                # 名稱查找順序：即時盤 > V32列表 > 代號
+                name = rt_info.get('名稱', '')
+                if not name:
+                    v32_match = v32_df[v32_df['代號'] == code]
+                    if not v32_match.empty:
+                        name = v32_match.iloc[0]['名稱']
+                    else:
+                        name = code
+                
                 sc = score_map.get(code, 0)
                 val = curr * qty
                 c_tot = cost * qty
                 pl = val - c_tot
                 roi = (pl/c_tot*100) if c_tot>0 else 0
+                
                 if roi < -10: action = "🛑 停損 (虧損擴大)"
                 elif sc >= 60: action = "🟢 續抱 (動能仍存)"
                 else: action = "🔻 賣出 (動能熄火)"
-                res.append({'代號': code, '即時價': curr, '損益': pl, '報酬率%': roi, '攻擊分': sc, '建議操作': action, '持有股數': qty, '購入均價': cost})
+                
+                res.append({
+                    '代號': code,
+                    '名稱': name, # 新增名稱欄位
+                    '即時價': curr, 
+                    '損益': pl, 
+                    '報酬率%': roi, 
+                    '攻擊分': sc, 
+                    '建議操作': action, 
+                    '持有股數': qty, 
+                    '購入均價': cost
+                })
+            
             if res:
                 df_res = pd.DataFrame(res)
                 c1, c2, c3 = st.columns(3)
@@ -517,8 +543,9 @@ def main():
                 total_pl = df_res['損益'].sum()
                 c2.metric("總損益", f"${total_pl:,.0f}", delta=f"{total_pl:,.0f}")
                 c3.metric("總市值", f"${(df_res['即時價']*df_res['持有股數']).sum():,.0f}")
+                
                 st.dataframe(
-                    df_res[['代號', '持有股數', '購入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
+                    df_res[['代號', '名稱', '持有股數', '購入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
                     .format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
                     .map(color_surplus, subset=['損益','報酬率%'])
                     .map(color_action, subset=['建議操作']),
