@@ -29,6 +29,12 @@ st.markdown("""
         font-size: 24px;
         font-weight: bold;
     }
+    /* 調整按鈕樣式 */
+    .stButton>button {
+        width: 100%;
+        border-radius: 5px;
+        font-weight: bold;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -250,18 +256,18 @@ def calculate_indicators(hist):
         o_now = open_p.iloc[i]
 
         t_score = 60
-        if not np.isnan(ma20) and c_now > ma20: t_score += 5          
-        if not np.isnan(ma20) and not np.isnan(ma20_prev) and ma20 > ma20_prev: t_score += 5      
+        if not np.isnan(ma20) and c_now > ma20: t_score += 5           
+        if not np.isnan(ma20) and not np.isnan(ma20_prev) and ma20 > ma20_prev: t_score += 5       
         if not np.isnan(ma5) and not np.isnan(ma20) and not np.isnan(ma60):
             if ma5 > ma20 and ma20 > ma60: t_score += 10 
-        if not np.isnan(rsi_now) and rsi_now > 50: t_score += 5          
-        if not np.isnan(rsi_now) and rsi_now > 70: t_score += 5          
-        if not np.isnan(macd_now) and not np.isnan(sig_now) and macd_now > sig_now: t_score += 5    
+        if not np.isnan(rsi_now) and rsi_now > 50: t_score += 5           
+        if not np.isnan(rsi_now) and rsi_now > 70: t_score += 5           
+        if not np.isnan(macd_now) and not np.isnan(sig_now) and macd_now > sig_now: t_score += 5     
         if not np.isnan(high_20_prev) and c_now > high_20_prev: t_score += 10 
 
         v_score = 60
-        if not np.isnan(v_ma20) and v_now > v_ma20: v_score += 10       
-        if not np.isnan(v_ma5) and v_now > v_ma5: v_score += 10        
+        if not np.isnan(v_ma20) and v_now > v_ma20: v_score += 10        
+        if not np.isnan(v_ma5) and v_now > v_ma5: v_score += 10         
         is_red = c_now > o_now
         vol_increase = v_now > v_prev
         if is_red and vol_increase: v_score += 15 
@@ -334,8 +340,10 @@ def load_holdings():
         contents = repo.get_contents(FILE_PATH)
         df = pd.read_csv(contents.download_url)
         df['股票代號'] = df['股票代號'].astype(str).str.strip()
+        # 確保必要欄位存在
         for c in ["股票代號", "買入均價", "持有股數"]:
-            if c not in df.columns: df[c] = 0 if c != "股票代號" else ""
+            if c not in df.columns: 
+                df[c] = 0.0 if "價" in c else (0 if "股" in c else "")
         return df[["股票代號", "買入均價", "持有股數"]]
     except:
         return pd.DataFrame(columns=["股票代號", "買入均價", "持有股數"])
@@ -349,7 +357,7 @@ def save_holdings(df):
         try:
             contents = repo.get_contents(FILE_PATH)
             repo.update_file(contents.path, f"Update {get_taiwan_time()}", csv_content, contents.sha)
-            st.success("✅ 儲存成功！")
+            st.success("✅ 庫存已同步至雲端！")
         except:
             repo.create_file(FILE_PATH, "Create holdings.csv", csv_content)
             st.success("✅ 建立並儲存成功！")
@@ -382,6 +390,12 @@ def get_raw_top10(df):
 # --- 主程式 ---
 def main():
     st.title("⚔️ V32 戰情室 (Real-Time Mode)")
+    
+    # 初始化 session state
+    if 'inventory' not in st.session_state:
+        st.session_state['inventory'] = load_holdings()
+    if 'input_key_counter' not in st.session_state:
+        st.session_state['input_key_counter'] = 0
     
     # 重新整理按鈕：只有按這個才會去觸發 twstock 更新即時價
     if st.button("🔄 刷新即時報價", type="primary"):
@@ -475,38 +489,106 @@ def main():
                     use_container_width=True
                 )
 
-    # === Tab 3: 庫存管理 + 即時 ===
+    # === Tab 3: 庫存管理 (Modify Here) ===
     with tab_inv:
-        st.subheader("📝 庫存監控")
-        # 載入資料
-        if 'editor_data' not in st.session_state:
-            st.session_state['editor_data'] = load_holdings()
-            
-        edited = st.data_editor(
-            st.session_state['editor_data'],
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "股票代號": st.column_config.TextColumn("代號", required=True),
-                "買入均價": st.column_config.NumberColumn("均價", format="%.2f"),
-                "持有股數": st.column_config.NumberColumn("股數", step=1000)
-            }, key="inv_editor"
-        )
-        if st.button("💾 儲存變更"):
-            save_holdings(edited)
-            st.rerun()
+        st.subheader("📝 庫存交易管理")
         
+        # 1. 輸入區塊：分離買入與賣出
+        input_key = st.session_state['input_key_counter']
+        
+        # 使用 Columns 稍微排版，但依照需求是第一列買、第二列賣
+        st.markdown("##### 📥 **買入登記 (Buy)** - 自動計算加權平均成本")
+        df_buy_in = pd.DataFrame([{"股票代號": "", "持有股數": 1000, "買入均價": 0.0}])
+        edited_buy = st.data_editor(
+            df_buy_in, 
+            num_rows="dynamic", 
+            key=f"buy_{input_key}", # Dynamic key for reset
+            use_container_width=True, 
+            hide_index=True
+        )
+        
+        st.markdown("##### 📤 **賣出登記 (Sell)** - 扣除股數")
+        df_sell_in = pd.DataFrame([{"股票代號": "", "持有股數": 1000}])
+        edited_sell = st.data_editor(
+            df_sell_in, 
+            num_rows="dynamic", 
+            key=f"sell_{input_key}", # Dynamic key for reset
+            use_container_width=True, 
+            hide_index=True
+        )
+        
+        # 2. 儲存按鈕
+        st.write("")
+        if st.button("💾 執行交易並儲存", type="primary"):
+            current_inv = st.session_state['inventory'].copy()
+            has_update = False
+            
+            # 處理買入 (加權平均)
+            for _, row in edited_buy.iterrows():
+                code = str(row['股票代號']).strip()
+                shares = int(row['持有股數']) if row['持有股數'] else 0
+                price = float(row['買入均價']) if row['買入均價'] else 0.0
+                
+                if code and shares > 0 and price > 0:
+                    has_update = True
+                    # 檢查是否既有
+                    match = current_inv[current_inv['股票代號'] == code]
+                    if not match.empty:
+                        idx = match.index[0]
+                        old_shares = float(current_inv.at[idx, '持有股數'])
+                        old_cost = float(current_inv.at[idx, '買入均價'])
+                        
+                        total_shares = old_shares + shares
+                        new_avg = ((old_shares * old_cost) + (shares * price)) / total_shares
+                        
+                        current_inv.at[idx, '持有股數'] = total_shares
+                        current_inv.at[idx, '買入均價'] = round(new_avg, 2)
+                    else:
+                        # 新增
+                        new_row = pd.DataFrame([{'股票代號': code, '持有股數': shares, '買入均價': price}])
+                        current_inv = pd.concat([current_inv, new_row], ignore_index=True)
+
+            # 處理賣出 (扣庫存)
+            for _, row in edited_sell.iterrows():
+                code = str(row['股票代號']).strip()
+                shares = int(row['持有股數']) if row['持有股數'] else 0
+                
+                if code and shares > 0:
+                    match = current_inv[current_inv['股票代號'] == code]
+                    if not match.empty:
+                        has_update = True
+                        idx = match.index[0]
+                        cur_shares = float(current_inv.at[idx, '持有股數'])
+                        
+                        if cur_shares > shares:
+                            current_inv.at[idx, '持有股數'] = cur_shares - shares
+                        else:
+                            # 賣光或超賣，移除該筆
+                            current_inv = current_inv.drop(idx)
+            
+            if has_update:
+                st.session_state['inventory'] = current_inv
+                save_holdings(current_inv)
+                # 增加計數器，強制重繪 data_editor (達到清空效果)
+                st.session_state['input_key_counter'] += 1 
+                st.rerun()
+            else:
+                st.warning("未偵測到有效交易資料")
+
         st.divider()
         
-        if not edited.empty:
-            # 準備計算資料
-            inv_codes = edited['股票代號'].astype(str).tolist()
+        # 3. 庫存儀表板 (Dashboard)
+        st.subheader("📊 持股監控")
+        
+        if not st.session_state['inventory'].empty:
+            inv_df = st.session_state['inventory'].copy()
+            inv_codes = inv_df['股票代號'].astype(str).tolist()
             inv_rt = get_realtime_quotes(inv_codes) # 取得即時價
             
             res = []
             score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
             
-            for idx, r in edited.iterrows():
+            for idx, r in inv_df.iterrows():
                 code = str(r['股票代號'])
                 if not code: continue
                 qty = float(r['持有股數'] or 0)
@@ -516,10 +598,9 @@ def main():
                 curr = inv_rt.get(code, {}).get('即時價', cost)
                 change = inv_rt.get(code, {}).get('漲跌幅%', 0)
                 
-                # V32 建議邏輯 (使用昨收 MA20，因為盤中 MA 會跳動)
+                # V32 訊號
                 sc = score_map.get(code, 0)
                 signal = "⚪ 觀察"
-                # 這裡若要嚴謹的「破線」判斷，需要昨天的 MA20，暫時用簡單邏輯
                 if sc > 0 and sc < 60: signal = "🟡 熄火(停利)"
                 elif sc >= 80: signal = "🔴 強勢"
                 
@@ -557,6 +638,8 @@ def main():
                     use_container_width=True,
                     hide_index=True
                 )
+        else:
+            st.info("目前無庫存，請在上方新增交易。")
 
 if __name__ == "__main__":
     main()
