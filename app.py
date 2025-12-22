@@ -141,7 +141,7 @@ def get_realtime_quotes(code_list):
                     # 嘗試抓取 Fast Info
                     price = ticker.fast_info.last_price
                     prev_close = ticker.fast_info.previous_close
-                    # 嘗試抓取成交量 (YF fast_info 可能沒有即時量，改用 last_volume 或 0)
+                    # 嘗試抓取成交量
                     try:
                         volume = ticker.fast_info.last_volume
                     except:
@@ -169,7 +169,7 @@ def merge_realtime_data(df):
     codes = df['代號'].astype(str).tolist()
     rt_data = get_realtime_quotes(codes)
     
-    # 映射資料 (關鍵修正：補回「當日量」)
+    # 映射資料
     df['即時價'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('即時價', np.nan))
     df['漲跌幅%'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('漲跌幅%', np.nan))
     df['當日量'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('當日量', 0))
@@ -479,7 +479,7 @@ def main():
                     .format(fmt_score)
                     .map(color_change, subset=['漲跌幅%'])
                     .background_gradient(subset=['攻擊分'], cmap='Reds')
-                    .map(color_action, subset=['穩定度']), # 這裡借用一下 action color
+                    .map(color_action, subset=['穩定度']), 
                     hide_index=True,
                     use_container_width=True
                 )
@@ -513,7 +513,7 @@ def main():
                     use_container_width=True
                 )
 
-    # === Tab 3: 庫存管理 (New Request) ===
+    # === Tab 3: 庫存管理 (Updated) ===
     with tab_inv:
         st.subheader("📝 庫存交易管理")
         
@@ -612,9 +612,8 @@ def main():
                 qty = float(r['持有股數'] or 0)
                 cost = float(r['買入均價'] or 0)
                 
-                # 取得即時資訊 (若完全抓不到，回傳0，絕對不回傳cost，以免誤導)
+                # 取得即時資訊 (若完全抓不到，回傳0)
                 curr = inv_rt.get(code, {}).get('即時價', 0)
-                change = inv_rt.get(code, {}).get('漲跌幅%', 0)
                 
                 # 攻擊分 & 操作建議
                 sc = score_map.get(code, 0)
@@ -636,7 +635,6 @@ def main():
                 res.append({
                     '代號': code,
                     '即時價': curr,
-                    '漲跌幅%': change,
                     '損益': pl,
                     '報酬率%': roi,
                     '攻擊分': sc,
@@ -655,13 +653,12 @@ def main():
                 c2.metric("總損益", f"${total_pl:,.0f}", delta=f"{total_pl:,.0f}")
                 c3.metric("總市值", f"${(df_res['即時價']*df_res['持有股數']).sum():,.0f}")
                 
-                # 表格顯示 (使用新的建議操作欄位)
+                # 表格顯示 (移除了「漲跌幅%」)
                 st.dataframe(
-                    df_res[['代號', '持有股數', '購入均價', '即時價', '漲跌幅%', '損益', '報酬率%', '攻擊分', '建議操作']].style
-                    .format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
+                    df_res[['代號', '持有股數', '購入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
+                    .format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
                     .map(color_surplus, subset=['損益','報酬率%'])
-                    .map(color_change, subset=['漲跌幅%'])
-                    .map(color_action, subset=['建議操作']), # 套用新的建議顏色
+                    .map(color_action, subset=['建議操作']),
                     use_container_width=True,
                     hide_index=True,
                     column_config={
