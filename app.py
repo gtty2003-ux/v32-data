@@ -20,11 +20,8 @@ st.set_page_config(
 )
 
 # --- 全域變數 (雙倉庫設定) ---
-# 1. 資料來源：去 auto-updater 拿股價大檔
 DATA_REPO = "gtty2003-ux/v32-auto-updater" 
 DATA_FILE = "v32_dataset.csv"
-
-# 2. 庫存來源：在庫存倉庫 (自己) 存取庫存檔
 HOLDING_REPO = "gtty2003-ux/v32-data"
 HOLDINGS_FILE = "holdings.csv"
 
@@ -70,11 +67,8 @@ def color_change(val):
 # --- 核心 1：從 Auto-Updater 讀取股價資料 ---
 @st.cache_data(ttl=1800)
 def load_data_from_github():
-    """從 v32-auto-updater 讀取 V32 數據"""
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
-        
-        # 注意：這裡使用 DATA_REPO (指向 updater)
         url = f"https://api.github.com/repos/{DATA_REPO}/contents/{DATA_FILE}"
         headers = {
             "Authorization": f"token {token}",
@@ -85,7 +79,6 @@ def load_data_from_github():
         
         if response.status_code == 200:
             df = pd.read_csv(io.StringIO(response.text))
-            
             df['Code'] = df['Code'].astype(str).str.strip()
             df['Date'] = pd.to_datetime(df['Date'])
             
@@ -93,19 +86,18 @@ def load_data_from_github():
             for c in numeric_cols:
                 if c in df.columns: 
                     df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-            
             return df
         else:
             if response.status_code == 404:
                 return pd.DataFrame()
-            st.error(f"GitHub (Data) 連線失敗: {response.status_code} - 請確認 v32-auto-updater 是否有產出檔案")
+            st.error(f"GitHub (Data) 連線失敗: {response.status_code}")
             return pd.DataFrame()
             
     except Exception as e:
         st.error(f"讀取資料錯誤: {e}")
         return pd.DataFrame()
 
-# --- V32 運算邏輯 (不變) ---
+# --- V32 運算邏輯 ---
 def calculate_v32_score(df_group):
     if len(df_group) < 60: return None 
     
@@ -310,7 +302,6 @@ def load_holdings():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
         g = Github(token)
-        # 注意：這裡使用 HOLDING_REPO (指向自己)
         repo = g.get_repo(HOLDING_REPO)
         contents = repo.get_contents(HOLDINGS_FILE)
         df = pd.read_csv(contents.download_url)
@@ -326,7 +317,6 @@ def save_holdings(df):
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
         g = Github(token)
-        # 注意：這裡使用 HOLDING_REPO (指向自己)
         repo = g.get_repo(HOLDING_REPO)
         csv_content = df.to_csv(index=False)
         try:
@@ -338,23 +328,29 @@ def save_holdings(df):
             st.success("✅ 建立並儲存成功！")
     except Exception as e: st.error(f"❌ 儲存失敗: {e}")
 
-# --- 篩選與排序邏輯 ---
+# --- 篩選邏輯 (86-92分 + 股價<80) ---
 def get_stratified_selection(df):
-    if df.empty: return df, []
-    cols = ['攻擊分', '技術分', '量能分']
-    for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+    if df.empty: return df
     
-    mask = (df['技術分'] >= 60) & (df['量能分'] >= 60) & (df['攻擊分'] >= 80)
+    # 1. 確保數值型態正確
+    cols = ['攻擊分', '技術分', '量能分', '收盤']
+    for c in cols: 
+        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+    
+    # 2. 嚴格篩選條件：
+    #    (1) 技術 >= 60, 量能 >= 60
+    #    (2) 股價 <= 80 (剔除高價股)
+    #    (3) 攻擊分鎖定 86 ~ 92 (剔除過熱股)
+    mask = (df['技術分'] >= 60) & \
+           (df['量能分'] >= 60) & \
+           (df['收盤'] <= 80) & \
+           (df['攻擊分'] >= 86) & \
+           (df['攻擊分'] <= 92)
+           
     filtered = df[mask].copy()
-    if filtered.empty: return pd.DataFrame(), ["無符合條件標的"]
     
-    b_a = filtered[filtered['攻擊分'] >= 90].sort_values('攻擊分', ascending=False).head(5)
-    b_b = filtered[(filtered['攻擊分'] >= 85) & (filtered['攻擊分'] < 90)].sort_values('攻擊分', ascending=False).head(5)
-    b_c = filtered[(filtered['攻擊分'] >= 80) & (filtered['攻擊分'] < 85)].sort_values('攻擊分', ascending=False).head(5)
-    
-    final = pd.concat([b_a, b_b, b_c])
-    stats = [f"90+: {len(b_a)}", f"85-90: {len(b_b)}", f"80-85: {len(b_c)}"]
-    return final, stats
+    # 依照攻擊分排序
+    return filtered.sort_values('攻擊分', ascending=False)
 
 def get_raw_top10(df):
     if df.empty: return df
@@ -372,12 +368,13 @@ def main():
         st.cache_data.clear()
         st.rerun()
 
-    # 1. 載入資料 (從 Updater Repo)
+    # 1. 載入資料
     with st.spinner("正在讀取核心數據 (v32-auto-updater)..."):
         v32_df, err = process_data()
         
     if err: st.error(err)
     if not v32_df.empty:
+        # 過濾非普通股 (ETF, KY, 債券等)
         v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱', '')) or 'KY' in str(r.get('名稱', '')) or str(r['代號']).startswith(('00','91'))) else 'General', axis=1)
         v32_df = v32_df[v32_df['cat'] == 'General']
         st.caption(f"分析完成: 共 {len(v32_df)} 檔股票 | 資料來源: v32-auto-updater")
@@ -385,38 +382,92 @@ def main():
     tab_strat, tab_raw, tab_inv = st.tabs(["🎯 V32 精選", "🏆 全市場 Top 10", "💼 庫存管理"])
     fmt_score = {'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '當日量':'{:,}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
 
-    # === Tab 1: V32 精選 ===
+    # === Tab 1: V32 精選 (三階分表 + 無漲跌幅) ===
     with tab_strat:
         if not v32_df.empty:
-            final_df, stats = get_stratified_selection(v32_df)
-            st.info(f"🎯 戰略結構：{' | '.join(stats)}")
+            # 取得所有符合 86-92分 & 股價<80 的股票
+            final_df = get_stratified_selection(v32_df)
+            
             if not final_df.empty:
+                # 補上即時報價
                 final_df = merge_realtime_data(final_df)
                 
                 col_btn, col_info = st.columns([1, 4])
                 with col_btn:
+                    # 一次掃描所有區段的籌碼
                     scan_chip = st.button("🚀 籌碼掃描", key="btn_strat_scan")
-                if scan_chip:
-                    with st.spinner("分析籌碼中..."):
-                        chip_df = get_chip_analysis(final_df['代號'].tolist())
-                        if not chip_df.empty: final_df = pd.merge(final_df, chip_df, on='代號', how='left')
-
-                final_df = final_df.sort_values(['攻擊分', '漲跌幅%'], ascending=[False, False])
-                cols_to_show = ['代號','名稱','即時價','漲跌幅%','技術分','量能分','攻擊分']
-                if '主力動向' in final_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
                 
-                st.dataframe(
-                    final_df[cols_to_show].style
-                    .format(fmt_score)
-                    .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red)
-                    .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue)
-                    .background_gradient(subset=['量能分'], cmap=cmap_pastel_green)
-                    .map(color_change, subset=['漲跌幅%']), 
-                    hide_index=True,
-                    use_container_width=True
-                )
-            else: st.warning("無符合 V32 條件標的")
-        else: st.warning("暫無資料 (請確認 v32-auto-updater 是否已執行 Action)")
+                if scan_chip:
+                    with st.spinner("正在掃描全區段籌碼..."):
+                        chip_df = get_chip_analysis(final_df['代號'].tolist())
+                        if not chip_df.empty: 
+                            final_df = pd.merge(final_df, chip_df, on='代號', how='left')
+
+                # 定義顯示欄位 (已移除漲跌幅)
+                base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
+                if '主力動向' in final_df.columns: 
+                    base_cols += ['主力動向', '投信(張)', '外資(張)']
+
+                # 拆解成三個等級
+                # S級: 90 <= 分數 <= 92
+                df_s = final_df[(final_df['攻擊分'] >= 90) & (final_df['攻擊分'] <= 92)]
+                
+                # A級: 88 <= 分數 < 90
+                df_a = final_df[(final_df['攻擊分'] >= 88) & (final_df['攻擊分'] < 90)]
+                
+                # B級: 86 <= 分數 < 88
+                df_b = final_df[(final_df['攻擊分'] >= 86) & (final_df['攻擊分'] < 88)]
+
+                # --- S 級表格 ---
+                st.subheader(f"👑 S 級主力區 (90-92分) - 共 {len(df_s)} 檔")
+                if not df_s.empty:
+                    st.dataframe(
+                        df_s[base_cols].style
+                        .format(fmt_score)
+                        .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red)
+                        .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue)
+                        .background_gradient(subset=['量能分'], cmap=cmap_pastel_green),
+                        hide_index=True, use_container_width=True
+                    )
+                else:
+                    st.caption("此區段暫無標的")
+
+                st.divider()
+
+                # --- A 級表格 ---
+                st.subheader(f"🚀 A 級蓄勢區 (88-90分) - 共 {len(df_a)} 檔")
+                if not df_a.empty:
+                    st.dataframe(
+                        df_a[base_cols].style
+                        .format(fmt_score)
+                        .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red)
+                        .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue)
+                        .background_gradient(subset=['量能分'], cmap=cmap_pastel_green),
+                        hide_index=True, use_container_width=True
+                    )
+                else:
+                    st.caption("此區段暫無標的")
+
+                st.divider()
+
+                # --- B 級表格 ---
+                st.subheader(f"👀 B 級觀察區 (86-88分) - 共 {len(df_b)} 檔")
+                if not df_b.empty:
+                    st.dataframe(
+                        df_b[base_cols].style
+                        .format(fmt_score)
+                        .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red)
+                        .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue)
+                        .background_gradient(subset=['量能分'], cmap=cmap_pastel_green),
+                        hide_index=True, use_container_width=True
+                    )
+                else:
+                    st.caption("此區段暫無標的")
+
+            else: 
+                st.warning("無符合條件標的 (區間 86~92 分, 股價<=80)")
+        else: 
+            st.warning("暫無資料 (請確認 v32-auto-updater 是否已執行 Action)")
 
     # === Tab 2: Top 10 ===
     with tab_raw:
