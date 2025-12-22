@@ -1,562 +1,174 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
-import os
-from datetime import datetime, timedelta
-import pytz
-import yfinance as yf
-from github import Github 
-import time
-from FinMind.data import DataLoader
-import twstock # 引入輕量級台股套件
 
-# --- 設定頁面資訊 ---
-st.set_page_config(
-    page_title="V32 戰情室 (Real-Time)",
-    layout="wide",
-    page_icon="⚔️"
-)
+# --- 模擬用：初始化 Session State (若已存在則不重置) ---
+if 'inventory' not in st.session_state:
+    # 這是實際儲存庫存的地方 [代號, 持有股數, 平均成本]
+    st.session_state['inventory'] = pd.DataFrame(columns=['代號', '股數', '均價'])
 
-# --- 樣式設定 ---
-st.markdown("""
-    <style>
-    .stDataFrame thead tr th {
-        background-color: #ffebee !important; 
-        color: #b71c1c !important;
-        font-weight: bold;
+# --- 模擬用：取得即時股價函數 (請替換成你原本 V32 的抓取邏輯) ---
+def get_realtime_data(code):
+    # 這裡只是模擬數據，請接上你原本的 crawler 或 API
+    mock_data = {
+        '2915': {'price': 55.0, 'attack': 89, 'signal': '🔴 強勢'},
+        '1528': {'price': 15.9, 'attack': 89, 'signal': '🔴 強勢'},
+        '3028': {'price': 38.0, 'attack': 85, 'signal': '🔴 強勢'},
+        '1210': {'price': 51.0, 'attack': 67, 'signal': '⚪ 觀察'},
     }
-    div[data-testid="stMetricValue"] {
-        font-size: 24px;
-        font-weight: bold;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    return mock_data.get(code, {'price': 0, 'attack': 0, 'signal': '無訊號'})
 
-# --- 全域變數 ---
-REPO_KEY = "gtty2003-ux/v32-data"
-FILE_PATH = "holdings.csv"
+# ==========================================
+# UI 區塊開始
+# ==========================================
 
-# --- 工具函數 ---
-def get_taiwan_time():
-    utc_now = datetime.utcnow()
-    tw_time = utc_now.replace(tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Taipei'))
-    return tw_time.strftime("%Y-%m-%d %H:%M:%S")
+st.title("V32 庫存管理系統")
 
-def color_surplus(val):
-    if not isinstance(val, (int, float)): return ''
-    if val > 0: return 'color: #d32f2f; font-weight: bold;' # 紅
-    elif val < 0: return 'color: #388e3c; font-weight: bold;' # 綠
-    return 'color: black'
+# --- 第一部分：交易輸入區 (買入 & 賣出) ---
+st.subheader("1. 交易輸入")
 
-def color_stability(val):
-    if not isinstance(val, str): return ''
-    try:
-        score = int(val.split('/')[0])
-        if score <= 2: return 'color: #E65100; font-weight: bold;'
-        elif score >= 3: return 'color: #2E7D32; font-weight: bold;'
-    except: pass
-    return ''
+col_buy, col_sell = st.columns(2)
 
-def color_change(val):
-    if not isinstance(val, (int, float)): return ''
-    if val > 0: return 'color: #d32f2f; background-color: rgba(255,0,0,0.1); font-weight: bold;'
-    elif val < 0: return 'color: #388e3c; background-color: rgba(0,255,0,0.1); font-weight: bold;'
-    return 'color: gray'
+with col_buy:
+    st.markdown("##### 📥 新增買入 (Buy)")
+    # 建立一個空的範本供使用者輸入
+    input_buy_df = pd.DataFrame([{"代號": "", "股數": 1000, "均價": 0.0}])
+    edited_buy = st.data_editor(
+        input_buy_df, 
+        num_rows="dynamic", 
+        key="editor_buy",
+        use_container_width=True,
+        hide_index=True
+    )
 
-# --- 核心防鎖機制：即時報價抓取 ---
-@st.cache_data(ttl=60) # 設定 60 秒快取，保護 IP
-def get_realtime_quotes(code_list):
-    """
-    使用 twstock 抓取即時報價 (MIS Server)，避開 yfinance 的頻繁請求
-    """
-    if not code_list:
-        return {}
+with col_sell:
+    st.markdown("##### 📤 賣出調節 (Sell)")
+    # 建立一個空的範本供使用者輸入
+    input_sell_df = pd.DataFrame([{"代號": "", "股數": 1000, "賣出價": 0.0}])
+    edited_sell = st.data_editor(
+        input_sell_df, 
+        num_rows="dynamic", 
+        key="editor_sell",
+        use_container_width=True,
+        hide_index=True
+    )
+
+# --- 第二部分：儲存按鈕與邏輯處理 ---
+st.write("") # Spacer
+if st.button("💾 儲存變更 (更新庫存)", type="primary", use_container_width=True):
+    current_inv = st.session_state['inventory'].copy()
     
-    # 移除重複並確保是字串
-    code_list = list(set([str(c) for c in code_list]))
-    realtime_data = {}
-    
-    # 分批處理，避免一次請求過長
-    chunk_size = 20
-    chunks = [code_list[i:i + chunk_size] for i in range(0, len(code_list), chunk_size)]
-    
-    for chunk in chunks:
-        try:
-            # twstock 批次抓取
-            stocks = twstock.realtime.get(chunk)
+    # 1. 處理買入 (邏輯：計算加權平均)
+    for index, row in edited_buy.iterrows():
+        if row['代號'] and row['股數'] > 0:
+            code = str(row['代號'])
+            new_shares = int(row['股數'])
+            new_price = float(row['均價'])
             
-            # 格式統一處理
-            if isinstance(stocks, dict): stocks = [stocks]
+            # 檢查是否已在庫存
+            if code in current_inv['代號'].values:
+                idx = current_inv[current_inv['代號'] == code].index[0]
+                old_shares = current_inv.at[idx, '股數']
+                old_price = current_inv.at[idx, '均價']
                 
-            if stocks:
-                for stock in stocks:
-                    if stock['success']:
-                        code = stock['info']['code']
-                        
-                        # 價格容錯處理
-                        price_str = stock['realtime'].get('latest_trade_price', '-')
-                        if price_str == '-' or not price_str:
-                            # 如果沒有成交價，試著拿最佳買入價或開盤價
-                            price_str = stock['realtime'].get('best_bid_price', ['-'])[0]
-                        
-                        # 如果還是沒有，拿昨收
-                        last_close = float(stock['info']['last_price']) if stock['info']['last_price'] != '-' else 0
-                        
-                        try:
-                            current_price = float(price_str)
-                        except:
-                            current_price = last_close # 真的抓不到就用昨收
-                        
-                        # 計算漲跌幅
-                        change_pct = 0.0
-                        if last_close > 0:
-                            change_pct = ((current_price - last_close) / last_close) * 100
-                            
-                        # 量能
-                        vol_str = stock['realtime'].get('accumulate_trade_volume', '0')
-                        volume = int(vol_str) if vol_str != '-' else 0
-                        
-                        realtime_data[code] = {
-                            '即時價': current_price,
-                            '漲跌幅%': change_pct,
-                            '當日量': volume,
-                            '時間': stock['realtime'].get('time', '')
-                        }
-            time.sleep(0.5) # 禮貌性暫停
-        except Exception as e:
-            # 這裡可以 print log 但不要中斷程式
-            continue
-            
-    return realtime_data
-
-def merge_realtime_data(df):
-    """將即時資料合併回原本的 DataFrame"""
-    if df.empty: return df
-    
-    codes = df['代號'].astype(str).tolist()
-    rt_data = get_realtime_quotes(codes)
-    
-    # 映射資料
-    df['即時價'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('即時價', np.nan))
-    df['漲跌幅%'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('漲跌幅%', np.nan))
-    df['當日量'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('當日量', 0))
-    
-    # 補值：如果還沒開盤或抓不到，用歷史收盤價補
-    df['即時價'] = df['即時價'].fillna(df['收盤'])
-    df['漲跌幅%'] = df['漲跌幅%'].fillna(0)
-    
-    return df
-
-# --- FinMind 籌碼分析 (維持原樣) ---
-def get_chip_analysis(symbol_list):
-    chip_data = []
-    dl = DataLoader()
-    p_bar = st.progress(0)
-    status = st.empty()
-    total = len(symbol_list)
-    start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-    
-    for i, symbol in enumerate(symbol_list):
-        status.text(f"🔍 分析籌碼結構: {symbol} ({i+1}/{total})...")
-        p_bar.progress((i + 1) / total)
-        try:
-            df = dl.taiwan_stock_institutional_investors(stock_id=symbol, start_date=start_date)
-            if df.empty:
-                chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '⚪ 資料不足'})
-                continue
-            latest_date = df['date'].iloc[-1]
-            day_data = df[df['date'] == latest_date]
-            
-            foreign_net = day_data[day_data['name'].str.contains('Foreign')]['buy'].sum() - \
-                          day_data[day_data['name'].str.contains('Foreign')]['sell'].sum()
-            foreign_buy = int(foreign_net // 1000)
-
-            trust_net = day_data[day_data['name'] == 'Investment_Trust']['buy'].sum() - \
-                        day_data[day_data['name'] == 'Investment_Trust']['sell'].sum()
-            trust_buy = int(trust_net // 1000)
-            
-            status_str = ""
-            if trust_buy > 0: status_str += "🔴 投信買 "
-            elif trust_buy < 0: status_str += "🟢 投信賣 "
-            if foreign_buy > 1000: status_str += "🔥 外資大買 "
-            elif foreign_buy < -1000: status_str += "🧊 外資倒貨 "
-            
-            if trust_buy > 0 and foreign_buy > 0: final_tag = "🚀 土洋合買"
-            elif trust_buy > 0 and foreign_buy < 0: final_tag = "⚔️ 土洋對作(信)"
-            elif trust_buy < 0 and foreign_buy > 0: final_tag = "⚔️ 土洋對作(外)"
-            elif trust_buy < 0 and foreign_buy < 0: final_tag = "☠️ 主力棄守"
-            elif trust_buy == 0 and abs(foreign_buy) < 50: final_tag = "⚪ 籌碼觀望"
-            else: final_tag = "🟡 一般輪動"
+                # 加權平均公式：(舊股數*舊價 + 新股數*新價) / 總股數
+                total_shares = old_shares + new_shares
+                avg_cost = ((old_shares * old_price) + (new_shares * new_price)) / total_shares
                 
-            chip_data.append({
-                '代號': symbol,
-                '投信(張)': trust_buy,
-                '外資(張)': foreign_buy,
-                '主力動向': f"{final_tag} | {status_str}"
-            })
-            time.sleep(0.05) 
-        except Exception as e:
-            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ Error'})
-            
-    p_bar.empty()
-    status.empty()
-    return pd.DataFrame(chip_data)
-
-# --- V32 運算邏輯 (重度運算，設定長快取) ---
-def calculate_indicators(hist):
-    # (此函數保持原樣，因為是核心邏輯)
-    if len(hist) < 65: return 0, 0, 0, "0/5"
-    close = hist['Close']
-    vol = hist['Volume']
-    high = hist['High']
-    open_p = hist['Open']
-    
-    ma5_s = close.rolling(5).mean()
-    ma20_s = close.rolling(20).mean()
-    ma60_s = close.rolling(60).mean()
-    
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    rsi_s = 100 - (100 / (1 + rs))
-
-    exp1 = close.ewm(span=12, adjust=False).mean()
-    exp2 = close.ewm(span=26, adjust=False).mean()
-    macd_s = exp1 - exp2
-    signal_s = macd_s.ewm(span=9, adjust=False).mean()
-
-    vol_ma20_s = vol.rolling(20).mean()
-    vol_ma5_s = vol.rolling(5).mean()
-    high_20_s = high.rolling(20).max()
-
-    raw_scores = [] 
-    lookback_indices = range(-7, 0)
-
-    for i in lookback_indices:
-        c_now = close.iloc[i]
-        ma5 = ma5_s.iloc[i]
-        ma20 = ma20_s.iloc[i]
-        ma20_prev = ma20_s.iloc[i-1] 
-        ma60 = ma60_s.iloc[i]
-        rsi_now = rsi_s.iloc[i]
-        macd_now = macd_s.iloc[i]
-        sig_now = signal_s.iloc[i]
-        high_20_prev = high_20_s.iloc[i-1] 
-        v_now = vol.iloc[i]
-        v_prev = vol.iloc[i-1]
-        v_ma20 = vol_ma20_s.iloc[i]
-        v_ma5 = vol_ma5_s.iloc[i]
-        o_now = open_p.iloc[i]
-
-        t_score = 60
-        if not np.isnan(ma20) and c_now > ma20: t_score += 5          
-        if not np.isnan(ma20) and not np.isnan(ma20_prev) and ma20 > ma20_prev: t_score += 5      
-        if not np.isnan(ma5) and not np.isnan(ma20) and not np.isnan(ma60):
-            if ma5 > ma20 and ma20 > ma60: t_score += 10 
-        if not np.isnan(rsi_now) and rsi_now > 50: t_score += 5          
-        if not np.isnan(rsi_now) and rsi_now > 70: t_score += 5          
-        if not np.isnan(macd_now) and not np.isnan(sig_now) and macd_now > sig_now: t_score += 5    
-        if not np.isnan(high_20_prev) and c_now > high_20_prev: t_score += 10 
-
-        v_score = 60
-        if not np.isnan(v_ma20) and v_now > v_ma20: v_score += 10       
-        if not np.isnan(v_ma5) and v_now > v_ma5: v_score += 10        
-        is_red = c_now > o_now
-        vol_increase = v_now > v_prev
-        if is_red and vol_increase: v_score += 15 
-        if not np.isnan(v_ma20) and v_now > v_ma20 * 1.5: v_score += 5 
-
-        t_score = min(100, t_score)
-        v_score = min(100, v_score)
-        daily_total = (t_score * 0.7) + (v_score * 0.3)
-        raw_scores.append(daily_total)
-
-    raw_scores = [0 if np.isnan(x) else x for x in raw_scores]
-    if len(raw_scores) < 2: return 0, 0, 0, "0/5"
-    raw_today = raw_scores[-1]
-    raw_yesterday = raw_scores[-2]
-    attack_score = (raw_today * 0.7) + (raw_yesterday * 0.3)
-    last_5_days = raw_scores[-5:]
-    stability_count = sum(1 for s in last_5_days if s >= 70)
-    stability_str = f"{stability_count}/5"
-
-    return t_score, v_score, attack_score, stability_str
-
-@st.cache_data(ttl=3600) # 設定 1 小時快取，避免每次刷新都去抓歷史 K 線
-def run_v32_engine(ticker_list):
-    results = []
-    p_bar = st.progress(0)
-    status = st.empty()
-    total = len(ticker_list)
-    
-    for i, row in enumerate(ticker_list):
-        symbol = str(row['代號'])
-        name = str(row.get('名稱', ''))
-        status.text(f"建立 V32 戰略地圖: {symbol} {name} ({i+1}/{total})...")
-        p_bar.progress((i + 1) / total)
-        try:
-            stock = yf.Ticker(f"{symbol}.TW")
-            hist = stock.history(period="6mo")
-            if len(hist) < 65: continue 
-            t_s, v_s, atk_s, stab = calculate_indicators(hist)
-            results.append({
-                '代號': symbol, '名稱': name,
-                '收盤': hist['Close'].iloc[-1], # 這是昨收
-                '技術分': t_s, '量能分': v_s, '攻擊分': atk_s, '穩定度': stab   
-            })
-        except: continue
-            
-    p_bar.empty()
-    status.empty()
-    return pd.DataFrame(results)
-
-def load_and_process_data():
-    url = f"https://raw.githubusercontent.com/{REPO_KEY}/main/v32_recommend.csv"
-    try:
-        df = pd.read_csv(url)
-        code_col = next((c for c in ['代碼', '代號', 'Code', 'Symbol'] if c in df.columns), None)
-        if code_col:
-            df[code_col] = df[code_col].astype(str).str.strip()
-            df = df.rename(columns={code_col: '代號'})
-            # 呼叫有快取保護的引擎
-            processed = run_v32_engine(df[['代號', '名稱']].to_dict('records'))
-            return processed, None
-    except Exception as e:
-        return pd.DataFrame(), str(e)
-
-# --- GitHub 庫存存取 ---
-def load_holdings():
-    try:
-        token = st.secrets["general"]["GITHUB_TOKEN"]
-        g = Github(token)
-        repo = g.get_repo(REPO_KEY)
-        contents = repo.get_contents(FILE_PATH)
-        df = pd.read_csv(contents.download_url)
-        df['股票代號'] = df['股票代號'].astype(str).str.strip()
-        for c in ["股票代號", "買入均價", "持有股數"]:
-            if c not in df.columns: df[c] = 0 if c != "股票代號" else ""
-        return df[["股票代號", "買入均價", "持有股數"]]
-    except:
-        return pd.DataFrame(columns=["股票代號", "買入均價", "持有股數"])
-
-def save_holdings(df):
-    try:
-        token = st.secrets["general"]["GITHUB_TOKEN"]
-        g = Github(token)
-        repo = g.get_repo(REPO_KEY)
-        csv_content = df.to_csv(index=False)
-        try:
-            contents = repo.get_contents(FILE_PATH)
-            repo.update_file(contents.path, f"Update {get_taiwan_time()}", csv_content, contents.sha)
-            st.success("✅ 儲存成功！")
-        except:
-            repo.create_file(FILE_PATH, "Create holdings.csv", csv_content)
-            st.success("✅ 建立並儲存成功！")
-    except Exception as e:
-        st.error(f"❌ 儲存失敗: {e}")
-
-# --- 篩選與排序邏輯 ---
-def get_stratified_selection(df):
-    if df.empty: return df, []
-    cols = ['攻擊分', '技術分', '量能分']
-    for c in cols:
-        df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-    mask = (df['技術分'] >= 80) & (df['量能分'] >= 60) & (df['攻擊分'] >= 86) & (df['攻擊分'] <= 92)
-    filtered = df[mask].copy()
-    if filtered.empty: return pd.DataFrame(), ["無符合條件標的"]
-    
-    # 分層邏輯
-    b_a = filtered[(filtered['攻擊分'] >= 90) & (filtered['攻擊分'] <= 92)].sort_values('攻擊分', ascending=False).head(5)
-    b_b = filtered[(filtered['攻擊分'] >= 88) & (filtered['攻擊分'] < 90)].sort_values('攻擊分', ascending=False).head(5)
-    b_c = filtered[(filtered['攻擊分'] >= 86) & (filtered['攻擊分'] < 88)].sort_values('攻擊分', ascending=False).head(5)
-    final = pd.concat([b_a, b_b, b_c])
-    stats = [f"90-92: {len(b_a)}", f"88-90: {len(b_b)}", f"86-88: {len(b_c)}"]
-    return final, stats
-
-def get_raw_top10(df):
-    if df.empty: return df
-    df['攻擊分'] = pd.to_numeric(df['攻擊分'], errors='coerce').fillna(0)
-    return df.sort_values(by='攻擊分', ascending=False).head(10)
-
-# --- 主程式 ---
-def main():
-    st.title("⚔️ V32 戰情室 (Real-Time Mode)")
-    
-    # 重新整理按鈕：只有按這個才會去觸發 twstock 更新即時價
-    if st.button("🔄 刷新即時報價", type="primary"):
-        st.cache_data.clear() # 清除短快取
-        st.rerun()
-
-    st.caption(f"最後更新: {get_taiwan_time()} | V32(昨收) + 即時報價(盤中) | 自動保護 IP 機制已啟動")
-    
-    v32_df, err = load_and_process_data()
-    if err: st.error(err)
-
-    if not v32_df.empty:
-        # 過濾特殊股
-        v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱')) or 'KY' in str(r.get('名稱')) or str(r['代號']).startswith(('00','91')) or str(r['代號'])[-1].isalpha() or (len(str(r['代號']))>4 and str(r['代號']).isdigit())) else 'General', axis=1)
-        v32_df = v32_df[v32_df['cat'] == 'General']
-
-    tab_strat, tab_raw, tab_inv = st.tabs(["🎯 今日攻擊力 Top 15", "🏆 原始攻擊分 Top 10", "💼 庫存管理"])
-    
-    # 共用的顯示欄位與格式
-    fmt_score = {'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '攻擊分':'{:.1f}', '當日量':'{:,}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
-
-    # === Tab 1: 分層精選 + 即時 ===
-    with tab_strat:
-        if not v32_df.empty:
-            final_df, stats = get_stratified_selection(v32_df)
-            st.info(f"🎯 戰略結構：{' | '.join(stats)}")
-            
-            if not final_df.empty:
-                # 1. 抓取即時報價
-                final_df = merge_realtime_data(final_df)
-                
-                # 2. 功能區塊
-                col_btn, col_info = st.columns([1, 4])
-                with col_btn:
-                    scan_chip = st.button("🚀 籌碼掃描", key="btn_strat_scan")
-                
-                if scan_chip:
-                    with st.spinner("分析籌碼中..."):
-                        chip_df = get_chip_analysis(final_df['代號'].tolist())
-                        if not chip_df.empty:
-                            final_df = pd.merge(final_df, chip_df, on='代號', how='left')
-
-                # 3. 排序 (盤中可考慮用漲跌幅排序，這裡維持攻擊分)
-                final_df = final_df.sort_values(['攻擊分', '漲跌幅%'], ascending=[False, False])
-                
-                # 4. 顯示
-                cols_to_show = ['代號','名稱','即時價','漲跌幅%','當日量','攻擊分','穩定度']
-                if '主力動向' in final_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
-                
-                st.dataframe(
-                    final_df[cols_to_show].style
-                    .format(fmt_score)
-                    .map(color_change, subset=['漲跌幅%'])
-                    .background_gradient(subset=['攻擊分'], cmap='Reds')
-                    .map(color_stability, subset=['穩定度']),
-                    hide_index=True,
-                    use_container_width=True
-                )
+                current_inv.at[idx, '股數'] = total_shares
+                current_inv.at[idx, '均價'] = round(avg_cost, 2)
             else:
-                st.warning("無符合條件標的")
-        else:
-            st.warning("暫無資料")
+                # 新增一筆
+                new_row = pd.DataFrame([{'代號': code, '股數': new_shares, '均價': new_price}])
+                current_inv = pd.concat([current_inv, new_row], ignore_index=True)
 
-    # === Tab 2: Top 10 + 即時 ===
-    with tab_raw:
-        st.markdown("### 🏆 全市場攻擊力排行 (Top 10)")
-        if not v32_df.empty:
-            raw_df = get_raw_top10(v32_df)
-            if not raw_df.empty:
-                # 1. 抓取即時報價
-                raw_df = merge_realtime_data(raw_df)
-                
-                # 2. 功能區塊
-                if st.button("🚀 籌碼掃描 (Top 10)", key="btn_raw_scan"):
-                    with st.spinner("分析籌碼中..."):
-                        chip_df = get_chip_analysis(raw_df['代號'].tolist())
-                        if not chip_df.empty:
-                            raw_df = pd.merge(raw_df, chip_df, on='代號', how='left')
-
-                # 3. 顯示
-                cols_to_show = ['代號','名稱','即時價','漲跌幅%','當日量','攻擊分','穩定度']
-                if '主力動向' in raw_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
-
-                st.dataframe(
-                    raw_df[cols_to_show].style
-                    .format(fmt_score)
-                    .map(color_change, subset=['漲跌幅%'])
-                    .background_gradient(subset=['攻擊分'], cmap='Reds')
-                    .map(color_stability, subset=['穩定度']),
-                    hide_index=True,
-                    use_container_width=True
-                )
-
-    # === Tab 3: 庫存管理 + 即時 ===
-    with tab_inv:
-        st.subheader("📝 庫存監控")
-        # 載入資料
-        if 'editor_data' not in st.session_state:
-            st.session_state['editor_data'] = load_holdings()
+    # 2. 處理賣出 (邏輯：減少股數，若歸零則刪除)
+    for index, row in edited_sell.iterrows():
+        if row['代號'] and row['股數'] > 0:
+            code = str(row['代號'])
+            sell_shares = int(row['股數'])
             
-        edited = st.data_editor(
-            st.session_state['editor_data'],
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "股票代號": st.column_config.TextColumn("代號", required=True),
-                "買入均價": st.column_config.NumberColumn("均價", format="%.2f"),
-                "持有股數": st.column_config.NumberColumn("股數", step=1000)
-            }, key="inv_editor"
-        )
-        if st.button("💾 儲存變更"):
-            save_holdings(edited)
-            st.rerun()
+            if code in current_inv['代號'].values:
+                idx = current_inv[current_inv['代號'] == code].index[0]
+                current_shares = current_inv.at[idx, '股數']
+                
+                if current_shares > sell_shares:
+                    current_inv.at[idx, '股數'] = current_shares - sell_shares
+                    # 賣出通常不影響剩餘股票的單位成本，故不更新均價
+                else:
+                    # 全部賣光，移除該行
+                    current_inv = current_inv.drop(idx)
+    
+    # 更新回 Session State
+    st.session_state['inventory'] = current_inv
+    st.success("庫存已更新！")
+    st.rerun() # 重新執行以刷新下方顯示
+
+# --- 第三部分：庫存監控儀表板 (下方顯示) ---
+st.divider()
+st.subheader("2. 庫存即時監控")
+
+if not st.session_state['inventory'].empty:
+    inventory_df = st.session_state['inventory'].copy()
+    
+    # 準備計算欄位
+    display_rows = []
+    total_cost = 0
+    total_value = 0
+    total_profit = 0
+    
+    for idx, row in inventory_df.iterrows():
+        code = str(row['代號'])
+        cost_price = float(row['均價'])
+        shares = int(row['股數'])
         
-        st.divider()
+        # 取得即時報價
+        realtime = get_realtime_data(code)
+        current_price = realtime['price']
         
-        if not edited.empty:
-            # 準備計算資料
-            inv_codes = edited['股票代號'].astype(str).tolist()
-            inv_rt = get_realtime_quotes(inv_codes) # 取得即時價
-            
-            res = []
-            score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
-            
-            for idx, r in edited.iterrows():
-                code = str(r['股票代號'])
-                if not code: continue
-                qty = float(r['持有股數'] or 0)
-                cost = float(r['買入均價'] or 0)
-                
-                # 取得即時資訊
-                curr = inv_rt.get(code, {}).get('即時價', cost)
-                change = inv_rt.get(code, {}).get('漲跌幅%', 0)
-                
-                # V32 建議邏輯 (使用昨收 MA20，因為盤中 MA 會跳動)
-                sc = score_map.get(code, 0)
-                signal = "⚪ 觀察"
-                # 這裡若要嚴謹的「破線」判斷，需要昨天的 MA20，暫時用簡單邏輯
-                if sc > 0 and sc < 60: signal = "🟡 熄火(停利)"
-                elif sc >= 80: signal = "🔴 強勢"
-                
-                val = curr * qty
-                c_tot = cost * qty
-                pl = val - c_tot
-                roi = (pl/c_tot*100) if c_tot>0 else 0
-                
-                res.append({
-                    '代號': code,
-                    '即時價': curr,
-                    '漲跌幅%': change,
-                    '損益': pl,
-                    '報酬率%': roi,
-                    '攻擊分': sc,
-                    '訊號': signal,
-                    '股數': qty,
-                    '成本': cost
-                })
-            
-            if res:
-                df_res = pd.DataFrame(res)
-                # 總計 Dashboard
-                c1, c2, c3 = st.columns(3)
-                c1.metric("總成本", f"${(df_res['成本']*df_res['股數']).sum():,.0f}")
-                total_pl = df_res['損益'].sum()
-                c2.metric("總損益", f"${total_pl:,.0f}", delta=f"{total_pl:,.0f}")
-                c3.metric("總市值", f"${(df_res['即時價']*df_res['股數']).sum():,.0f}")
-                
-                st.dataframe(
-                    df_res[['代號', '即時價', '漲跌幅%', '損益', '報酬率%', '攻擊分', '訊號']].style
-                    .format({'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
-                    .map(color_surplus, subset=['損益','報酬率%'])
-                    .map(color_change, subset=['漲跌幅%']),
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-if __name__ == "__main__":
-    main()
+        # 計算個別數據
+        market_val = current_price * shares
+        cost_val = cost_price * shares
+        profit = market_val - cost_val
+        roi = (profit / cost_val * 100) if cost_val > 0 else 0
+        
+        # 累加總計
+        total_cost += cost_val
+        total_value += market_val
+        total_profit += profit
+        
+        display_rows.append({
+            "代號": code,
+            "即時價": current_price,
+            "成本均價": cost_price,
+            "股數": shares,
+            "損益": int(profit),
+            "報酬率%": f"{roi:.2f}%",
+            "攻擊分": realtime['attack'],
+            "訊號": realtime['signal']
+        })
+    
+    final_df = pd.DataFrame(display_rows)
+    
+    # 顯示上方大指標 (Metrics)
+    m1, m2, m3 = st.columns(3)
+    m1.metric("總成本", f"${total_cost:,.0f}")
+    m2.metric("總損益", f"${total_profit:,.0f}", delta=f"{total_profit:,.0f}")
+    m3.metric("總市值", f"${total_value:,.0f}")
+    
+    # 顯示詳細表格 (依照攻擊分排序)
+    st.dataframe(
+        final_df.sort_values(by="攻擊分", ascending=False),
+        use_container_width=True,
+        column_config={
+            "攻擊分": st.column_config.ProgressColumn(
+                "攻擊分",
+                help="V32 攻擊分數",
+                format="%d",
+                min_value=0,
+                max_value=100,
+            ),
+        },
+        hide_index=True
+    )
+else:
+    st.info("目前無庫存，請在上方新增買入資料。")
