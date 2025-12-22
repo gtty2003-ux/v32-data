@@ -5,4 +5,7 @@ yfinance
 PyGithub
 FinMind
 twstock
-lxml
+matplotlib
+google-api-python-client
+google-auth
+pytz
