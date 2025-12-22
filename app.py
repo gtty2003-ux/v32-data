@@ -330,7 +330,7 @@ def load_and_process_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-# --- GitHub 庫存存取 (已修復 KeyError 問題) ---
+# --- GitHub 庫存存取 ---
 def load_holdings():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
@@ -346,11 +346,9 @@ def load_holdings():
             '均價': '買入均價', '成本': '買入均價', 'Price': '買入均價', 'Cost': '買入均價'
         }
         df = df.rename(columns=rename_map)
-        # -------------------------------------
         
         df['股票代號'] = df['股票代號'].astype(str).str.strip()
         
-        # 確保必要欄位存在
         for c in ["股票代號", "買入均價", "持有股數"]:
             if c not in df.columns: 
                 df[c] = 0.0 if "價" in c else (0 if "股" in c else "")
@@ -406,17 +404,15 @@ def main():
     if 'inventory' not in st.session_state:
         st.session_state['inventory'] = load_holdings()
         
-    # --- 安全檢查：確保載入的庫存有正確欄位 (防止舊數據導致 KeyError) ---
+    # 安全檢查
     if '股票代號' not in st.session_state['inventory'].columns:
         st.session_state['inventory'] = load_holdings()
-    # -------------------------------------------------------------
 
     if 'input_key_counter' not in st.session_state:
         st.session_state['input_key_counter'] = 0
     
-    # 重新整理按鈕：只有按這個才會去觸發 twstock 更新即時價
     if st.button("🔄 刷新即時報價", type="primary"):
-        st.cache_data.clear() # 清除短快取
+        st.cache_data.clear()
         st.rerun()
 
     st.caption(f"最後更新: {get_taiwan_time()} | V32(昨收) + 即時報價(盤中) | 自動保護 IP 機制已啟動")
@@ -425,26 +421,21 @@ def main():
     if err: st.error(err)
 
     if not v32_df.empty:
-        # 過濾特殊股
         v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱')) or 'KY' in str(r.get('名稱')) or str(r['代號']).startswith(('00','91')) or str(r['代號'])[-1].isalpha() or (len(str(r['代號']))>4 and str(r['代號']).isdigit())) else 'General', axis=1)
         v32_df = v32_df[v32_df['cat'] == 'General']
 
     tab_strat, tab_raw, tab_inv = st.tabs(["🎯 今日攻擊力 Top 15", "🏆 原始攻擊分 Top 10", "💼 庫存管理"])
     
-    # 共用的顯示欄位與格式
     fmt_score = {'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '攻擊分':'{:.1f}', '當日量':'{:,}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
 
-    # === Tab 1: 分層精選 + 即時 ===
+    # === Tab 1: 分層精選 ===
     with tab_strat:
         if not v32_df.empty:
             final_df, stats = get_stratified_selection(v32_df)
             st.info(f"🎯 戰略結構：{' | '.join(stats)}")
             
             if not final_df.empty:
-                # 1. 抓取即時報價
                 final_df = merge_realtime_data(final_df)
-                
-                # 2. 功能區塊
                 col_btn, col_info = st.columns([1, 4])
                 with col_btn:
                     scan_chip = st.button("🚀 籌碼掃描", key="btn_strat_scan")
@@ -455,10 +446,7 @@ def main():
                         if not chip_df.empty:
                             final_df = pd.merge(final_df, chip_df, on='代號', how='left')
 
-                # 3. 排序 (盤中可考慮用漲跌幅排序，這裡維持攻擊分)
                 final_df = final_df.sort_values(['攻擊分', '漲跌幅%'], ascending=[False, False])
-                
-                # 4. 顯示
                 cols_to_show = ['代號','名稱','即時價','漲跌幅%','當日量','攻擊分','穩定度']
                 if '主力動向' in final_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
                 
@@ -476,23 +464,19 @@ def main():
         else:
             st.warning("暫無資料")
 
-    # === Tab 2: Top 10 + 即時 ===
+    # === Tab 2: Top 10 ===
     with tab_raw:
         st.markdown("### 🏆 全市場攻擊力排行 (Top 10)")
         if not v32_df.empty:
             raw_df = get_raw_top10(v32_df)
             if not raw_df.empty:
-                # 1. 抓取即時報價
                 raw_df = merge_realtime_data(raw_df)
-                
-                # 2. 功能區塊
                 if st.button("🚀 籌碼掃描 (Top 10)", key="btn_raw_scan"):
                     with st.spinner("分析籌碼中..."):
                         chip_df = get_chip_analysis(raw_df['代號'].tolist())
                         if not chip_df.empty:
                             raw_df = pd.merge(raw_df, chip_df, on='代號', how='left')
 
-                # 3. 顯示
                 cols_to_show = ['代號','名稱','即時價','漲跌幅%','當日量','攻擊分','穩定度']
                 if '主力動向' in raw_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
 
@@ -506,20 +490,18 @@ def main():
                     use_container_width=True
                 )
 
-    # === Tab 3: 庫存管理 (Modify Here) ===
+    # === Tab 3: 庫存管理 (Updated) ===
     with tab_inv:
         st.subheader("📝 庫存交易管理")
         
-        # 1. 輸入區塊：分離買入與賣出
         input_key = st.session_state['input_key_counter']
         
-        # 使用 Columns 稍微排版，但依照需求是第一列買、第二列賣
         st.markdown("##### 📥 **買入登記 (Buy)** - 自動計算加權平均成本")
         df_buy_in = pd.DataFrame([{"股票代號": "", "持有股數": 1000, "買入均價": 0.0}])
         edited_buy = st.data_editor(
             df_buy_in, 
             num_rows="dynamic", 
-            key=f"buy_{input_key}", # Dynamic key for reset
+            key=f"buy_{input_key}", 
             use_container_width=True, 
             hide_index=True
         )
@@ -529,18 +511,17 @@ def main():
         edited_sell = st.data_editor(
             df_sell_in, 
             num_rows="dynamic", 
-            key=f"sell_{input_key}", # Dynamic key for reset
+            key=f"sell_{input_key}", 
             use_container_width=True, 
             hide_index=True
         )
         
-        # 2. 儲存按鈕
         st.write("")
         if st.button("💾 執行交易並儲存", type="primary"):
             current_inv = st.session_state['inventory'].copy()
             has_update = False
             
-            # 處理買入 (加權平均)
+            # 買入處理
             for _, row in edited_buy.iterrows():
                 code = str(row['股票代號']).strip()
                 shares = int(row['持有股數']) if row['持有股數'] else 0
@@ -548,7 +529,6 @@ def main():
                 
                 if code and shares > 0 and price > 0:
                     has_update = True
-                    # 檢查是否既有
                     match = current_inv[current_inv['股票代號'] == code]
                     if not match.empty:
                         idx = match.index[0]
@@ -561,11 +541,10 @@ def main():
                         current_inv.at[idx, '持有股數'] = total_shares
                         current_inv.at[idx, '買入均價'] = round(new_avg, 2)
                     else:
-                        # 新增
                         new_row = pd.DataFrame([{'股票代號': code, '持有股數': shares, '買入均價': price}])
                         current_inv = pd.concat([current_inv, new_row], ignore_index=True)
 
-            # 處理賣出 (扣庫存)
+            # 賣出處理
             for _, row in edited_sell.iterrows():
                 code = str(row['股票代號']).strip()
                 shares = int(row['持有股數']) if row['持有股數'] else 0
@@ -580,13 +559,11 @@ def main():
                         if cur_shares > shares:
                             current_inv.at[idx, '持有股數'] = cur_shares - shares
                         else:
-                            # 賣光或超賣，移除該筆
                             current_inv = current_inv.drop(idx)
             
             if has_update:
                 st.session_state['inventory'] = current_inv
                 save_holdings(current_inv)
-                # 增加計數器，強制重繪 data_editor (達到清空效果)
                 st.session_state['input_key_counter'] += 1 
                 st.rerun()
             else:
@@ -594,13 +571,13 @@ def main():
 
         st.divider()
         
-        # 3. 庫存儀表板 (Dashboard)
+        # 庫存監控表格 (Modified)
         st.subheader("📊 持股監控")
         
         if not st.session_state['inventory'].empty:
             inv_df = st.session_state['inventory'].copy()
             inv_codes = inv_df['股票代號'].astype(str).tolist()
-            inv_rt = get_realtime_quotes(inv_codes) # 取得即時價
+            inv_rt = get_realtime_quotes(inv_codes) 
             
             res = []
             score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
@@ -611,16 +588,17 @@ def main():
                 qty = float(r['持有股數'] or 0)
                 cost = float(r['買入均價'] or 0)
                 
-                # 取得即時資訊
+                # 即時資訊
                 curr = inv_rt.get(code, {}).get('即時價', cost)
                 change = inv_rt.get(code, {}).get('漲跌幅%', 0)
                 
-                # V32 訊號
+                # 攻擊分訊號
                 sc = score_map.get(code, 0)
                 signal = "⚪ 觀察"
                 if sc > 0 and sc < 60: signal = "🟡 熄火(停利)"
                 elif sc >= 80: signal = "🔴 強勢"
                 
+                # 損益計算
                 val = curr * qty
                 c_tot = cost * qty
                 pl = val - c_tot
@@ -634,26 +612,32 @@ def main():
                     '報酬率%': roi,
                     '攻擊分': sc,
                     '訊號': signal,
-                    '股數': qty,
-                    '成本': cost
+                    '持有股數': qty,
+                    '購入均價': cost
                 })
             
             if res:
                 df_res = pd.DataFrame(res)
-                # 總計 Dashboard
+                
+                # Dashboard
                 c1, c2, c3 = st.columns(3)
-                c1.metric("總成本", f"${(df_res['成本']*df_res['股數']).sum():,.0f}")
+                c1.metric("總成本", f"${(df_res['購入均價']*df_res['持有股數']).sum():,.0f}")
                 total_pl = df_res['損益'].sum()
                 c2.metric("總損益", f"${total_pl:,.0f}", delta=f"{total_pl:,.0f}")
-                c3.metric("總市值", f"${(df_res['即時價']*df_res['股數']).sum():,.0f}")
+                c3.metric("總市值", f"${(df_res['即時價']*df_res['持有股數']).sum():,.0f}")
                 
+                # 主要修改點：調整欄位順序並顯示「購入均價」
                 st.dataframe(
-                    df_res[['代號', '即時價', '漲跌幅%', '損益', '報酬率%', '攻擊分', '訊號']].style
-                    .format({'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
+                    df_res[['代號', '持有股數', '購入均價', '即時價', '漲跌幅%', '損益', '報酬率%', '攻擊分', '訊號']].style
+                    .format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
                     .map(color_surplus, subset=['損益','報酬率%'])
                     .map(color_change, subset=['漲跌幅%']),
                     use_container_width=True,
-                    hide_index=True
+                    hide_index=True,
+                    column_config={
+                        "購入均價": st.column_config.NumberColumn("購入均價", format="$%.2f"),
+                        "持有股數": st.column_config.NumberColumn("股數", format="%d")
+                    }
                 )
         else:
             st.info("目前無庫存，請在上方新增交易。")
