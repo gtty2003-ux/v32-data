@@ -1,9 +1,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
-import io
-import json
 from datetime import datetime, timedelta
 import pytz
 import yfinance as yf
@@ -12,63 +9,46 @@ import time
 from FinMind.data import DataLoader
 import twstock
 import matplotlib.colors as mcolors
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload
+import io
+import requests
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
-    page_title="V32 戰情室 (Drive Core)",
+    page_title="V32 戰情室 (GitHub Core)",
     layout="wide",
     page_icon="⚔️"
 )
 
+# --- 全域變數 ---
+# 請確認 REPO_KEY 是您的 "帳號/專案名稱"
+REPO_KEY = "gtty2003-ux/v32-data" 
+DATA_FILE = "v32_dataset.csv"      # 這是每日更新的股價大檔
+HOLDINGS_FILE = "holdings.csv"     # 這是您的庫存檔
+
 # --- 樣式設定 ---
 st.markdown("""
     <style>
-    .stDataFrame thead tr th {
-        background-color: #ffebee !important; 
-        color: #b71c1c !important;
-        font-weight: bold;
-    }
-    div[data-testid="stMetricValue"] {
-        font-size: 24px;
-        font-weight: bold;
-    }
-    .stButton>button {
-        width: 100%;
-        border-radius: 5px;
-        font-weight: bold;
-    }
+    .stDataFrame thead tr th {background-color: #ffebee !important; color: #b71c1c !important; font-weight: bold;}
+    div[data-testid="stMetricValue"] {font-size: 24px; font-weight: bold;}
+    .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
     </style>
     """, unsafe_allow_html=True)
-
-# --- 全域變數 ---
-# 這是您庫存檔案的 Repo，維持不變
-REPO_KEY = "gtty2003-ux/v32-data"
-FILE_PATH = "holdings.csv"
-# 這是 Google Drive 檔案 ID
-DRIVE_FILE_ID = "19z2dUYPqfR4igRStWJMKUofdWCPfqQR_"
-
-# --- 自定義淡色階 (Pastel Colormaps) ---
-def make_pastel_cmap(hex_color):
-    return mcolors.LinearSegmentedColormap.from_list("pastel_cmap", ["#ffffff", hex_color])
-
-cmap_pastel_red   = make_pastel_cmap("#ef9a9a")
-cmap_pastel_blue  = make_pastel_cmap("#90caf9")
-cmap_pastel_green = make_pastel_cmap("#a5d6a7")
 
 # --- 工具函數 ---
 def get_taiwan_time():
     utc_now = datetime.utcnow()
-    tw_time = utc_now.replace(tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Taipei'))
-    return tw_time.strftime("%Y-%m-%d %H:%M:%S")
+    return utc_now.replace(tzinfo=pytz.utc).astimezone(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M:%S")
+
+def make_pastel_cmap(hex_color):
+    return mcolors.LinearSegmentedColormap.from_list("pastel_cmap", ["#ffffff", hex_color])
+
+cmap_pastel_red = make_pastel_cmap("#ef9a9a")
+cmap_pastel_blue = make_pastel_cmap("#90caf9")
+cmap_pastel_green = make_pastel_cmap("#a5d6a7")
 
 def color_surplus(val):
     if not isinstance(val, (int, float)): return ''
-    if val > 0: return 'color: #d32f2f; font-weight: bold;'
-    elif val < 0: return 'color: #388e3c; font-weight: bold;'
-    return 'color: black'
+    return 'color: #d32f2f; font-weight: bold;' if val > 0 else ('color: #388e3c; font-weight: bold;' if val < 0 else 'color: black')
 
 def color_action(val):
     val_str = str(val)
@@ -78,91 +58,64 @@ def color_action(val):
         return 'color: #1b5e20; font-weight: bold;'
     return ''
 
-# --- Google Drive 連線 (JSON 解析終極版) ---
-@st.cache_resource
-def get_drive_service():
-    # 我們把 JSON 內容當作純文字放入，並使用 json.loads 讓 Python 自動處理格式轉換
-    # 這樣可以完美避開所有 "換行符號" 與 "斜線" 的問題
-    
-    json_str = r'''
-{
-  "type": "service_account",
-  "project_id": "v32-stock-bot",
-  "private_key_id": "d66f9a30ef7bae397ac2bbbdd24bb7919e96aa79",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7kO+PAF/3PQ+x\nZWMwLuJbv/55RHgkcknK67FV2JWLDhWiASYnB/bp4AjCi1tBGuO/vvHk1U5gFElB\nTWbZmcr9BNzsC27MS9CxYM80VhhtOGMzM2+h3sBLk7H+Whj4yIaI+cf36/lL/WjL\nG2gHb3U0JXeC1JsDoDpUfBlJ/W7UswLMUF1ANorCocgsFg59gMVhWgzYKFs+lI1L\nFg1M3xu83iZKzoBrrXYHF+qOIOZtRVfkGYKMEvUPiUkOavXrHTFkD3ulGIbSEwa4\nhDXUoDVqPtMDgvMUVc8G8DlMVtFDUOOcEaKmJxY7NgWnXicQdm9SjmH/KCQYiFaj\nptJXMKlnAgMBAAECggEADR6OIwp7q+dxeY8F6RDedFxxiDnpzWLRFoh11vNXQmqx\nyKsb6A7+jk1FT5Y/w8YFuBu6/66L1NyWYyLu1rmTIS995GTIUzHaXw3OcHK1Mq6H\nAcXPQRs7iA3EnW3f4UblYh9WhVjUDySid9Jq7Fo3cHZObbBBR3elnNMxUaOQZQAh\nvAhbYJeFzACp8Tm5LFMAdjsS2VZrVGtSOIthAv7YSC+vXe3OmCGLuM6EAGIIBMP3\nXToWhY6r0uQfm9d0UfI0xiorWSGsNkBZPK6+HAJ6QVMQwMADHx3/4zOq1v7L0bAe\n+p6DIhCUasA475s4JQkTCCnQC2NM7aw2t/n1Esf3gQKBgQDkLd52g9Ai2facS5wA\nr6gOUUgE+Oh0Tv43PA2yc6pjtqOznx3QYAhY6fqaNgGCVsAwU1ZwnOzDY5LurZfy\nJ9b0UZcd1spN4nwGEobZtdxurzxIdUAoTf6/6ClGGXSpILLgAi06Q+Vu8f1zpx0Y\nnpBGSiTGqt8f5IXtko2WyHS0TwKBgQDSb2rJMi+LAcYXqqjUufSYKq3kxw2aYSR8\nQ+K9Opwv0Cu6u+6JSqHFakfvdNNq21LisjBR16CIQhSYCNzVqsjEbFSKTHYiJ6Dc\nLc8vvHE4ceOZFgljnoPKsnW/OX5enUJjgQNcSexnqJIqXA6VzWtLXXmtzZ7HY02r\nZtdGdlO7aQKBgHz8SxDr3sRYU+cE22zcytcc2rAuj1W2NzWWJYKMLNb1ofGvxKrx\nD2F0uJpj3qvATQGrhHum2WGlV0R5vfMcs3ecgYQMtT+4QWsqFseGADp4rjKaVww8\nvL/tsT3+j5JcoN5nEtMJgdElqEkDTsK/iBOYZVCVJCbaDCo3zmq7XoGtAoGBAKqw\ns1alfYjslGjIBhAfEfaHz+udRjxuBXFCg11oeB4UZhQeslrsjZGbJuRlx8OKSY4W\naTlJhS5hI2E69x3dXOJu2Jghc0U7DbDq+37GBLR7NNkM1erXPiGhZf8JPKa0OpCJ\nqlcmozplssHnT/FU4W4NUVCYU+15cBvS3FWMT1jZAoGAeVwwQjhPmyMV0QWfGOrq\n+W2MLdpY0x7nyrogcTayRa5e3rvWQpMYysi5wKNeC2h1SBrqt9uy0TzxmncfuzFp\nc/lTfnLyqlcTki+LOxdO3t1PhiBEdtwPKgYUy1pVFzobshJFUpT1rU5sqZ33Qrk0\nPXtnDwQ6aHVBjNXbvFCu3D4=\\n-----END PRIVATE KEY-----\\n",
-  "client_email": "v32-auto-updater@v32-stock-bot.iam.gserviceaccount.com",
-  "client_id": "109928194171724697312",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/v32-auto-updater%40v32-stock-bot.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"
-}
-'''
+def color_change(val):
+    if not isinstance(val, (int, float)): return ''
+    if val > 0: return 'color: #d32f2f; background-color: rgba(255,0,0,0.1); font-weight: bold;'
+    elif val < 0: return 'color: #388e3c; background-color: rgba(0,255,0,0.1); font-weight: bold;'
+    return 'color: gray'
 
+# --- 核心：從 GitHub 讀取 CSV ---
+@st.cache_data(ttl=1800)
+def load_data_from_github():
+    """從 GitHub 私有倉庫讀取 V32 數據"""
     try:
-        # 關鍵步驟：使用 json.loads 將字串轉換為 Python 字典
-        # 這會自動將 \n 轉換為正確的換行符號，Google 就能讀懂了
-        service_account_info = json.loads(json_str)
+        token = st.secrets["general"]["GITHUB_TOKEN"]
         
-        creds = service_account.Credentials.from_service_account_info(
-            service_account_info, 
-            scopes=['https://www.googleapis.com/auth/drive.readonly']
-        )
-        return build('drive', 'v3', credentials=creds)
-    except Exception as e:
-        st.error(f"GCP 認證失敗: {e}")
-        return None
-
-@st.cache_data(ttl=1800) # 快取 30 分鐘，因為這是盤後資料
-def load_data_from_drive():
-    service = get_drive_service()
-    if not service: return pd.DataFrame()
-    
-    try:
-        request = service.files().get_media(fileId=DRIVE_FILE_ID)
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
-        done = False
-        while done is False:
-            status, done = downloader.next_chunk()
-        fh.seek(0)
-        df = pd.read_csv(fh)
-        
-        # 確保欄位名稱正確 (相容性處理)
-        # 如果是中文，轉成英文以便後續運算
-        rename_map = {
-            '日期': 'Date', '股票代碼': 'Code', '股票名稱': 'Name',
-            '成交股數': 'TradeVolume', '收盤價': 'ClosingPrice',
-            '開盤價': 'OpeningPrice', '最高價': 'HighestPrice', '最低價': 'LowestPrice'
+        # 使用 GitHub API 讀取 Raw Data
+        url = f"https://api.github.com/repos/{REPO_KEY}/contents/{DATA_FILE}"
+        headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3.raw"
         }
-        df.rename(columns=rename_map, inplace=True)
         
-        # 轉型
-        df['Code'] = df['Code'].astype(str).str.strip()
-        df['Date'] = pd.to_datetime(df['Date'])
-        numeric_cols = ['ClosingPrice', 'OpeningPrice', 'HighestPrice', 'LowestPrice', 'TradeVolume']
-        for c in numeric_cols:
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors='coerce')
-                
-        return df
+        response = requests.get(url, headers=headers)
+        
+        if response.status_code == 200:
+            df = pd.read_csv(io.StringIO(response.text))
+            
+            # 確保欄位型態正確
+            df['Code'] = df['Code'].astype(str).str.strip()
+            df['Date'] = pd.to_datetime(df['Date'])
+            
+            numeric_cols = ['ClosingPrice', 'OpeningPrice', 'HighestPrice', 'LowestPrice', 'TradeVolume']
+            for c in numeric_cols:
+                if c in df.columns: 
+                    df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+            
+            return df
+        else:
+            # 如果是 404，代表檔案還沒產生 (可能是第一次執行 Action 還沒跑完)
+            if response.status_code == 404:
+                return pd.DataFrame()
+            st.error(f"GitHub 連線失敗: {response.status_code}")
+            return pd.DataFrame()
+            
     except Exception as e:
-        st.error(f"無法從 Drive 下載資料: {e}")
+        st.error(f"讀取資料錯誤: {e}")
         return pd.DataFrame()
 
-# --- V32 運算核心 (改版：直接運算 DataFrame) ---
+# --- V32 運算邏輯 ---
 def calculate_v32_score(df_group):
-    # df_group 是一支股票的歷史資料 (已按日期排序)
-    if len(df_group) < 65: return None # 資料不足
-
+    # 資料太少不算
+    if len(df_group) < 60: return None 
+    
     df = df_group.sort_values('Date').reset_index(drop=True)
     close = df['ClosingPrice']
     vol = df['TradeVolume']
     high = df['HighestPrice']
     open_p = df['OpeningPrice']
     
-    # 技術指標計算
+    # 指標計算
     ma5 = close.rolling(5).mean()
     ma20 = close.rolling(20).mean()
     ma60 = close.rolling(60).mean()
@@ -182,13 +135,11 @@ def calculate_v32_score(df_group):
     vol_ma20 = vol.rolling(20).mean()
     high_20 = high.rolling(20).max()
     
-    # 只計算最近一天的分數
+    # 取最後一天的數據
     i = -1 
-    
     c_now = close.iloc[i]
-    if pd.isna(c_now): return None
+    if pd.isna(c_now) or c_now == 0: return None
     
-    # 提取當前值
     m5, m20, m60 = ma5.iloc[i], ma20.iloc[i], ma60.iloc[i]
     m20_prev = ma20.iloc[i-1]
     r_now = rsi.iloc[i]
@@ -198,7 +149,7 @@ def calculate_v32_score(df_group):
     v_m5, v_m20 = vol_ma5.iloc[i], vol_ma20.iloc[i]
     o_now = open_p.iloc[i]
     
-    # 評分邏輯
+    # 評分系統
     t_score = 60
     if c_now > m20: t_score += 5
     if m20 > m20_prev: t_score += 5
@@ -207,60 +158,45 @@ def calculate_v32_score(df_group):
     if r_now > 70: t_score += 5
     if macd_now > sig_now: t_score += 5
     if c_now > h20_prev: t_score += 10
+    t_score = min(100, t_score)
     
     v_score = 60
     if v_now > v_m20: v_score += 10
     if v_now > v_m5: v_score += 10
     if c_now > o_now and v_now > v_prev: v_score += 15
     if v_now > v_m20 * 1.5: v_score += 5
-    
-    t_score = min(100, t_score)
     v_score = min(100, v_score)
     
-    # 攻擊分 (需計算昨天的分數來做加權，這裡簡化處理，若需要精確可再回推一天)
-    # 這裡採用當日分數做為主要依據，或可用簡單加權
+    # 攻擊分 (簡易版: 70% 技術 + 30% 量能)
     raw_today = (t_score * 0.7) + (v_score * 0.3)
-    
-    # 穩定度 (回推 5 天)
-    stability_count = 0
-    # 簡化：只回傳分數，不重複計算 5 天的歷史分以免效能過低
     
     return {
         '技術分': t_score, 
         '量能分': v_score, 
-        '攻擊分': raw_today, # 暫以當日分為主，因效能考量
+        '攻擊分': raw_today, 
         '收盤': c_now
     }
 
 @st.cache_data(ttl=1800)
-def process_drive_data():
-    raw_df = load_data_from_drive()
-    if raw_df.empty: return pd.DataFrame(), "無法讀取數據"
+def process_data():
+    raw_df = load_data_from_github()
+    if raw_df.empty: return pd.DataFrame(), "無法讀取數據，請確認 GitHub Update Action 是否執行成功，或 v32_dataset.csv 是否存在。"
     
-    # 平行運算或群組運算
     results = []
     grouped = raw_df.groupby('Code')
     
-    # 為了進度條
-    total_stocks = len(grouped)
-    # p_bar = st.progress(0)
-    
-    for i, (code, group) in enumerate(grouped):
-        # 取出名稱 (假設同一代碼名稱都一樣，取最後一筆)
+    # 對每一檔股票算分
+    for code, group in grouped:
         name = group['Name'].iloc[-1]
-        
         score_data = calculate_v32_score(group)
         if score_data:
             score_data['代號'] = code
             score_data['名稱'] = name
             results.append(score_data)
-        
-        # if i % 50 == 0: p_bar.progress((i+1)/total_stocks)
-    
-    # p_bar.empty()
+            
     return pd.DataFrame(results), None
 
-# --- 核心防鎖機制 (維持不變) ---
+# --- 即時報價 (TWSE + Yahoo) ---
 @st.cache_data(ttl=60)
 def get_realtime_quotes(code_list):
     if not code_list: return {}
@@ -335,15 +271,14 @@ def merge_realtime_data(df):
     df['即時價'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('即時價', np.nan))
     df['漲跌幅%'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('漲跌幅%', np.nan))
     df['當日量'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('當日量', 0))
-    # 若無即時價，回退使用昨收
+    # 若無即時價，回退使用收盤價
     df['即時價'] = df['即時價'].fillna(df['收盤'])
     df['漲跌幅%'] = df['漲跌幅%'].fillna(0)
     df['當日量'] = df['當日量'].fillna(0)
     return df
 
-# --- FinMind 籌碼分析 (維持不變) ---
+# --- FinMind 籌碼分析 ---
 def get_chip_analysis(symbol_list):
-    # (此部分代碼維持原樣，篇幅考量省略，請直接使用您原本的 FinMind 函式)
     chip_data = []
     dl = DataLoader()
     p_bar = st.progress(0)
@@ -382,14 +317,15 @@ def get_chip_analysis(symbol_list):
     status.empty()
     return pd.DataFrame(chip_data)
 
-# --- 庫存存取 (維持 GitHub) ---
+# --- 庫存存取 (PyGithub) ---
 def load_holdings():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
         g = Github(token)
         repo = g.get_repo(REPO_KEY)
-        contents = repo.get_contents(FILE_PATH)
+        contents = repo.get_contents(HOLDINGS_FILE)
         df = pd.read_csv(contents.download_url)
+        # 欄位正規化
         rename_map = {'代號': '股票代號', 'Code': '股票代號', 'Symbol': '股票代號', '股數': '持有股數', 'Shares': '持有股數', '均價': '買入均價', '成本': '買入均價', 'Price': '買入均價', 'Cost': '買入均價'}
         df = df.rename(columns=rename_map)
         df['股票代號'] = df['股票代號'].astype(str).str.strip()
@@ -405,19 +341,21 @@ def save_holdings(df):
         repo = g.get_repo(REPO_KEY)
         csv_content = df.to_csv(index=False)
         try:
-            contents = repo.get_contents(FILE_PATH)
+            contents = repo.get_contents(HOLDINGS_FILE)
             repo.update_file(contents.path, f"Update {get_taiwan_time()}", csv_content, contents.sha)
             st.success("✅ 庫存已同步至雲端！")
         except:
-            repo.create_file(FILE_PATH, "Create holdings.csv", csv_content)
+            repo.create_file(HOLDINGS_FILE, "Create holdings.csv", csv_content)
             st.success("✅ 建立並儲存成功！")
     except Exception as e: st.error(f"❌ 儲存失敗: {e}")
 
-# --- 篩選與排序邏輯 (維持不變) ---
+# --- 篩選與排序邏輯 ---
 def get_stratified_selection(df):
     if df.empty: return df, []
+    # 確保數值型態
     cols = ['攻擊分', '技術分', '量能分']
     for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
+    
     # 篩選標準：技術分>60, 量能>60, 攻擊分>80
     mask = (df['技術分'] >= 60) & (df['量能分'] >= 60) & (df['攻擊分'] >= 80)
     filtered = df[mask].copy()
@@ -439,7 +377,8 @@ def get_raw_top10(df):
 
 # --- 主程式 ---
 def main():
-    st.title("⚔️ V32 戰情室 (Drive Core)")
+    st.title("⚔️ V32 戰情室 (GitHub Core)")
+    
     if 'inventory' not in st.session_state: st.session_state['inventory'] = load_holdings()
     if 'input_key_counter' not in st.session_state: st.session_state['input_key_counter'] = 0
     
@@ -447,15 +386,16 @@ def main():
         st.cache_data.clear()
         st.rerun()
 
-    # 1. 載入 Drive 資料並運算分數
-    with st.spinner("正在讀取 Google Drive 核心數據並進行全市場運算... (每日一次)"):
-        v32_df, err = process_drive_data()
+    # 1. 載入 GitHub 資料並運算分數
+    with st.spinner("正在從 GitHub 讀取核心數據..."):
+        v32_df, err = process_data()
         
     if err: st.error(err)
     if not v32_df.empty:
+        # 過濾特殊股
         v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱', '')) or 'KY' in str(r.get('名稱', '')) or str(r['代號']).startswith(('00','91'))) else 'General', axis=1)
         v32_df = v32_df[v32_df['cat'] == 'General']
-        st.caption(f"分析完成: 共 {len(v32_df)} 檔股票 | 資料來源: Google Drive (每日更新)")
+        st.caption(f"分析完成: 共 {len(v32_df)} 檔股票 | 資料來源: GitHub (v32_dataset.csv)")
 
     tab_strat, tab_raw, tab_inv = st.tabs(["🎯 V32 精選", "🏆 全市場 Top 10", "💼 庫存管理"])
     fmt_score = {'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '當日量':'{:,}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
@@ -492,7 +432,7 @@ def main():
                     use_container_width=True
                 )
             else: st.warning("無符合 V32 條件標的")
-        else: st.warning("暫無資料")
+        else: st.warning("暫無資料 (請確認 GitHub Action 是否已成功執行並產生 CSV)")
 
     # === Tab 2: Top 10 ===
     with tab_raw:
@@ -520,22 +460,70 @@ def main():
                     use_container_width=True
                 )
 
-    # === Tab 3: 庫存管理 (邏輯維持) ===
+    # === Tab 3: 庫存管理 ===
     with tab_inv:
-        # (這裡的程式碼與原本完全相同，省略以節省空間，請直接複製您原本的庫存管理區塊)
-        # 唯一要修改的是：
-        # 當要顯示庫存即時報價時，使用新的 v32_df 來取得分數
         st.subheader("📝 庫存交易管理")
         
-        # 簡單載入名稱對照 (從 Drive Data 建立)
+        # 簡單載入名稱對照
         name_map = {}
         if not v32_df.empty:
             name_map = dict(zip(v32_df['代號'], v32_df['名稱']))
 
-        # ... (以下交易登記介面代碼與您原本的完全相同，請保留) ...
-        # (為了完整性，若您需要我再貼一次這部分請告訴我)
-        # ...
+        # 交易介面
+        input_key = st.session_state['input_key_counter']
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("##### 📥 **買入**")
+            df_buy_in = pd.DataFrame([{"股票代號": "", "持有股數": 1000, "買入均價": 0.0}])
+            edited_buy = st.data_editor(df_buy_in, num_rows="dynamic", key=f"buy_{input_key}", hide_index=True)
+        with c2:
+            st.markdown("##### 📤 **賣出**")
+            df_sell_in = pd.DataFrame([{"股票代號": "", "持有股數": 1000}])
+            edited_sell = st.data_editor(df_sell_in, num_rows="dynamic", key=f"sell_{input_key}", hide_index=True)
         
+        st.write("")
+        if st.button("💾 執行交易並儲存", type="primary"):
+            current_inv = st.session_state['inventory'].copy()
+            has_update = False
+            # 買入邏輯
+            for _, row in edited_buy.iterrows():
+                code = str(row['股票代號']).strip()
+                shares = int(row['持有股數']) if row['持有股數'] else 0
+                price = float(row['買入均價']) if row['買入均價'] else 0.0
+                if code and shares > 0 and price > 0:
+                    has_update = True
+                    match = current_inv[current_inv['股票代號'] == code]
+                    if not match.empty:
+                        idx = match.index[0]
+                        old_shares = float(current_inv.at[idx, '持有股數'])
+                        old_cost = float(current_inv.at[idx, '買入均價'])
+                        total_shares = old_shares + shares
+                        new_avg = ((old_shares * old_cost) + (shares * price)) / total_shares
+                        current_inv.at[idx, '持有股數'] = total_shares
+                        current_inv.at[idx, '買入均價'] = round(new_avg, 2)
+                    else:
+                        new_row = pd.DataFrame([{'股票代號': code, '持有股數': shares, '買入均價': price}])
+                        current_inv = pd.concat([current_inv, new_row], ignore_index=True)
+            # 賣出邏輯
+            for _, row in edited_sell.iterrows():
+                code = str(row['股票代號']).strip()
+                shares = int(row['持有股數']) if row['持有股數'] else 0
+                if code and shares > 0:
+                    match = current_inv[current_inv['股票代號'] == code]
+                    if not match.empty:
+                        has_update = True
+                        idx = match.index[0]
+                        cur_shares = float(current_inv.at[idx, '持有股數'])
+                        if cur_shares > shares: current_inv.at[idx, '持有股數'] = cur_shares - shares
+                        else: current_inv = current_inv.drop(idx)
+            
+            if has_update:
+                st.session_state['inventory'] = current_inv
+                save_holdings(current_inv)
+                st.session_state['input_key_counter'] += 1 
+                st.rerun()
+            else: st.warning("未偵測到有效交易資料")
+
         st.divider()
         st.subheader("📊 持股監控")
         if not st.session_state['inventory'].empty:
@@ -552,7 +540,8 @@ def main():
                 
                 rt_info = inv_rt.get(code, {})
                 curr = rt_info.get('即時價', 0)
-                name = name_map.get(code, rt_info.get('名稱', code)) # 改用 Drive Map
+                # 使用 V32 檔案的名稱，若無則用即時盤名稱
+                name = name_map.get(code, rt_info.get('名稱', code)) 
                 sc = score_map.get(code, 0)
                 
                 val = curr * qty
@@ -572,7 +561,12 @@ def main():
             
             if res:
                 df_res = pd.DataFrame(res)
-                # ... (顯示邏輯不變) ...
+                c1, c2, c3 = st.columns(3)
+                c1.metric("總成本", f"${(df_res['購入均價']*df_res['持有股數']).sum():,.0f}")
+                total_pl = df_res['損益'].sum()
+                c2.metric("總損益", f"${total_pl:,.0f}", delta=f"{total_pl:,.0f}")
+                c3.metric("總市值", f"${(df_res['即時價']*df_res['持有股數']).sum():,.0f}")
+                
                 st.dataframe(
                     df_res[['代號', '名稱', '持有股數', '購入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
                     .format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
