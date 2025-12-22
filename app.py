@@ -54,7 +54,6 @@ def color_surplus(val):
     elif val < 0: return 'color: #388e3c; font-weight: bold;' # 綠
     return 'color: black'
 
-# 新增：操作建議的顏色邏輯
 def color_action(val):
     val_str = str(val)
     if "賣出" in val_str or "停損" in val_str:
@@ -108,12 +107,20 @@ def get_realtime_quotes(code_list):
                             current_price = float(price_str)
                         except:
                             current_price = 0.0 # 標記為失敗，稍後用 YF 補
+
+                        # 量能處理
+                        vol_str = stock['realtime'].get('accumulate_trade_volume', '0')
+                        try:
+                            volume = int(vol_str)
+                        except:
+                            volume = 0
                         
                         if current_price > 0:
                             change_pct = ((current_price - last_close) / last_close) * 100 if last_close > 0 else 0
                             realtime_data[code] = {
                                 '即時價': current_price,
                                 '漲跌幅%': change_pct,
+                                '當日量': volume,
                                 '來源': 'TWSE'
                             }
             time.sleep(0.2) # 禮貌性暫停
@@ -134,12 +141,18 @@ def get_realtime_quotes(code_list):
                     # 嘗試抓取 Fast Info
                     price = ticker.fast_info.last_price
                     prev_close = ticker.fast_info.previous_close
+                    # 嘗試抓取成交量 (YF fast_info 可能沒有即時量，改用 last_volume 或 0)
+                    try:
+                        volume = ticker.fast_info.last_volume
+                    except:
+                        volume = 0
                     
                     if price and price > 0:
                         change_pct = ((price - prev_close) / prev_close) * 100 if prev_close else 0
                         realtime_data[code] = {
                             '即時價': price,
                             '漲跌幅%': change_pct,
+                            '當日量': volume,
                             '來源': 'Yahoo'
                         }
                 except:
@@ -156,14 +169,15 @@ def merge_realtime_data(df):
     codes = df['代號'].astype(str).tolist()
     rt_data = get_realtime_quotes(codes)
     
-    # 映射資料
+    # 映射資料 (關鍵修正：補回「當日量」)
     df['即時價'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('即時價', np.nan))
     df['漲跌幅%'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('漲跌幅%', np.nan))
+    df['當日量'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('當日量', 0))
     
-    # 修正：如果真的全都抓不到，才用昨收補，絕對不用「成本價」補
-    # 這樣使用者才會知道是系統沒抓到資料，而不是誤以為平盤
+    # 修正：如果真的全都抓不到，才用昨收補
     df['即時價'] = df['即時價'].fillna(df['收盤'])
     df['漲跌幅%'] = df['漲跌幅%'].fillna(0)
+    df['當日量'] = df['當日量'].fillna(0)
     
     return df
 
