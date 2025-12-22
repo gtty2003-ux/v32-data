@@ -257,13 +257,12 @@ def save_holdings(df):
         st.success("✅ 儲存成功")
     except Exception as e: st.error(f"❌ 儲存失敗: {e}")
 
-# --- 核心篩選函式 (支援不同價位參數) ---
+# --- 核心篩選函式 ---
 def get_stratified_selection(df, price_limit):
     if df.empty: return df
     cols = ['攻擊分', '技術分', '量能分', '收盤']
     for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
     
-    # 篩選條件：股價 <= 指定上限, 分數 86~92
     mask = (df['技術分'] >= 60) & (df['量能分'] >= 60) & \
            (df['收盤'] <= price_limit) & \
            (df['攻擊分'] >= 86) & (df['攻擊分'] <= 92)
@@ -276,25 +275,39 @@ def display_graded_tables(filtered_df, key_suffix):
         st.warning("此條件下無符合標的")
         return
 
-    # 籌碼掃描
-    filtered_df = merge_realtime_data(filtered_df)
+    # 1. 先抓出預計會顯示的前 30 檔 (S/A/B 各 Top 10)
+    df_s_pre = filtered_df[(filtered_df['攻擊分'] >= 90) & (filtered_df['攻擊分'] <= 92)].head(10)
+    df_a_pre = filtered_df[(filtered_df['攻擊分'] >= 88) & (filtered_df['攻擊分'] < 90)].head(10)
+    df_b_pre = filtered_df[(filtered_df['攻擊分'] >= 86) & (filtered_df['攻擊分'] < 88)].head(10)
+    
+    # 合併這些會上榜的代號
+    target_codes = pd.concat([df_s_pre, df_a_pre, df_b_pre])['代號'].tolist()
+
+    # 2. 籌碼掃描 (只針對這 30 檔)
     col_btn, _ = st.columns([1, 4])
     with col_btn:
-        if st.button("🚀 籌碼掃描", key=f"scan_{key_suffix}"):
-            chip_df = get_chip_analysis(filtered_df['代號'].tolist())
-            if not chip_df.empty: filtered_df = pd.merge(filtered_df, chip_df, on='代號', how='left')
+        if st.button(f"🚀 籌碼掃描 (針對上榜 {len(target_codes)} 檔)", key=f"scan_{key_suffix}"):
+            if target_codes:
+                with st.spinner(f"正在分析最精華的 {len(target_codes)} 檔籌碼..."):
+                    chip_df = get_chip_analysis(target_codes)
+                    if not chip_df.empty: 
+                        # 將籌碼資料合併回原始 filtered_df
+                        filtered_df = pd.merge(filtered_df, chip_df, on='代號', how='left')
+
+    # 3. 補上即時報價 (針對所有篩選結果)
+    filtered_df = merge_realtime_data(filtered_df)
 
     # 定義顯示欄位
     base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
     if '主力動向' in filtered_df.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
     fmt_score = {'即時價':'{:.2f}', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
 
-    # 分級拆解 & 限制前 10 檔
+    # 4. 再次切分資料 (這次可能包含籌碼資料)
     df_s = filtered_df[(filtered_df['攻擊分'] >= 90) & (filtered_df['攻擊分'] <= 92)].head(10)
     df_a = filtered_df[(filtered_df['攻擊分'] >= 88) & (filtered_df['攻擊分'] < 90)].head(10)
     df_b = filtered_df[(filtered_df['攻擊分'] >= 86) & (filtered_df['攻擊分'] < 88)].head(10)
 
-    # 渲染表格
+    # 5. 渲染表格
     for title, df_sub, color in [
         (f"👑 S 級主力區 (90-92分) - Top {len(df_s)}", df_s, None),
         (f"🚀 A 級蓄勢區 (88-90分) - Top {len(df_a)}", df_a, None),
@@ -326,7 +339,6 @@ def main():
     if err: st.error(err)
     
     if not v32_df.empty:
-        # 過濾雜訊
         v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱', '')) or 'KY' in str(r.get('名稱', '')) or str(r['代號']).startswith(('00','91'))) else 'General', axis=1)
         v32_df = v32_df[v32_df['cat'] == 'General']
         st.caption(f"資料來源: v32-auto-updater | 總檔數: {len(v32_df)}")
@@ -364,7 +376,6 @@ def main():
         if st.button("💾 執行交易", type="primary"):
             current_inv = st.session_state['inventory'].copy()
             has_update = False
-            # 簡化交易邏輯
             for _, r in edited_buy.iterrows():
                 if r['股票代號'] and r['持有股數'] > 0:
                     code, shares, price = str(r['股票代號']).strip(), int(r['持有股數']), float(r['買入均價'])
@@ -400,17 +411,37 @@ def main():
             
             for _, r in inv_df.iterrows():
                 code, qty, cost = str(r['股票代號']), float(r['持有股數']), float(r['買入均價'])
-                curr = inv_rt.get(code, {}).get('即時價', cost) # 無報價則用成本算
+                curr = inv_rt.get(code, {}).get('即時價', cost) 
                 name = name_map.get(code, code)
+                sc = score_map.get(code, 0)
                 pl = (curr - cost) * qty
-                res.append({'代號': code, '名稱': name, '即時價': curr, '損益': pl, '報酬率%': (pl/(cost*qty)*100) if cost else 0, '攻擊分': score_map.get(code, 0), '持有股數': qty, '購入均價': cost})
+                roi = (pl/(cost*qty)*100) if cost else 0
+                
+                # 建議操作邏輯
+                if roi < -10: action = "🛑 停損"
+                elif sc >= 60: action = "🟢 續抱"
+                else: action = "🔻 賣出"
+
+                res.append({
+                    '代號': code, '名稱': name, '即時價': curr, 
+                    '損益': pl, '報酬率%': roi, 
+                    '攻擊分': sc, '建議操作': action, 
+                    '持有股數': qty, '購入均價': cost
+                })
             
             df_res = pd.DataFrame(res)
             c1, c2, c3 = st.columns(3)
             c1.metric("總成本", f"${(df_res['購入均價']*df_res['持有股數']).sum():,.0f}")
             c2.metric("總損益", f"${df_res['損益'].sum():,.0f}", delta=f"{df_res['損益'].sum():,.0f}")
             c3.metric("總市值", f"${(df_res['即時價']*df_res['持有股數']).sum():,.0f}")
-            st.dataframe(df_res.style.format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'}).map(color_surplus, subset=['損益','報酬率%']), use_container_width=True, hide_index=True)
+            
+            st.dataframe(
+                df_res[['代號', '名稱', '持有股數', '購入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
+                .format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
+                .map(color_surplus, subset=['損益','報酬率%'])
+                .map(color_action, subset=['建議操作']), 
+                use_container_width=True, hide_index=True
+            )
         else: st.info("目前無庫存")
 
 if __name__ == "__main__":
