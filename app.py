@@ -450,7 +450,8 @@ def main():
 
     tab_strat, tab_raw, tab_inv = st.tabs(["🎯 今日攻擊力 Top 15", "🏆 原始攻擊分 Top 10", "💼 庫存管理"])
     
-    fmt_score = {'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '攻擊分':'{:.1f}', '當日量':'{:,}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
+    # 格式設定：新增技術分與量能分
+    fmt_score = {'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '當日量':'{:,}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
 
     # === Tab 1: 分層精選 ===
     with tab_strat:
@@ -488,7 +489,7 @@ def main():
         else:
             st.warning("暫無資料")
 
-    # === Tab 2: Top 10 ===
+    # === Tab 2: Top 10 (Updated Here) ===
     with tab_raw:
         st.markdown("### 🏆 全市場攻擊力排行 (Top 10)")
         if not v32_df.empty:
@@ -501,19 +502,22 @@ def main():
                         if not chip_df.empty:
                             raw_df = pd.merge(raw_df, chip_df, on='代號', how='left')
 
-                cols_to_show = ['代號','名稱','即時價','漲跌幅%','當日量','攻擊分','穩定度']
+                # 修改：移除漲跌幅、當日量；新增技術分、量能分
+                cols_to_show = ['代號','名稱','即時價','技術分','量能分','攻擊分','穩定度']
                 if '主力動向' in raw_df.columns: cols_to_show += ['主力動向', '投信(張)', '外資(張)']
 
                 st.dataframe(
                     raw_df[cols_to_show].style
                     .format(fmt_score)
-                    .map(color_change, subset=['漲跌幅%'])
-                    .background_gradient(subset=['攻擊分'], cmap='Reds'),
+                    # 移除漲跌幅的顏色映射
+                    .background_gradient(subset=['攻擊分'], cmap='Reds')
+                    .background_gradient(subset=['技術分'], cmap='Blues') # 技術分用藍色系
+                    .background_gradient(subset=['量能分'], cmap='Greens'), # 量能分用綠色系
                     hide_index=True,
                     use_container_width=True
                 )
 
-    # === Tab 3: 庫存管理 (Updated) ===
+    # === Tab 3: 庫存管理 ===
     with tab_inv:
         st.subheader("📝 庫存交易管理")
         
@@ -594,13 +598,13 @@ def main():
 
         st.divider()
         
-        # 庫存監控表格 (Modified Logic)
+        # 庫存監控表格
         st.subheader("📊 持股監控")
         
         if not st.session_state['inventory'].empty:
             inv_df = st.session_state['inventory'].copy()
             inv_codes = inv_df['股票代號'].astype(str).tolist()
-            # 呼叫即時價 (含60秒快取 & 雙重備援)
+            # 呼叫即時價
             inv_rt = get_realtime_quotes(inv_codes) 
             
             res = []
@@ -612,7 +616,7 @@ def main():
                 qty = float(r['持有股數'] or 0)
                 cost = float(r['買入均價'] or 0)
                 
-                # 取得即時資訊 (若完全抓不到，回傳0)
+                # 取得即時資訊
                 curr = inv_rt.get(code, {}).get('即時價', 0)
                 
                 # 攻擊分 & 操作建議
@@ -624,7 +628,7 @@ def main():
                 pl = val - c_tot
                 roi = (pl/c_tot*100) if c_tot>0 else 0
                 
-                # 新的建議邏輯：持有或賣出
+                # 建議邏輯
                 if roi < -10:
                     action = "🛑 停損 (虧損擴大)"
                 elif sc >= 60:
@@ -653,7 +657,7 @@ def main():
                 c2.metric("總損益", f"${total_pl:,.0f}", delta=f"{total_pl:,.0f}")
                 c3.metric("總市值", f"${(df_res['即時價']*df_res['持有股數']).sum():,.0f}")
                 
-                # 表格顯示 (移除了「漲跌幅%」)
+                # 表格顯示
                 st.dataframe(
                     df_res[['代號', '持有股數', '購入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
                     .format({'購入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.0f}'})
