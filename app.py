@@ -14,16 +14,19 @@ import requests
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
-    page_title="V32 戰情室 (GitHub Core)",
+    page_title="V32 戰情室 (Dual Core)",
     layout="wide",
     page_icon="⚔️"
 )
 
-# --- 全域變數 ---
-# 請確認 REPO_KEY 是您的 "帳號/專案名稱"
-REPO_KEY = "gtty2003-ux/v32-data" 
-DATA_FILE = "v32_dataset.csv"      # 這是每日更新的股價大檔
-HOLDINGS_FILE = "holdings.csv"     # 這是您的庫存檔
+# --- 全域變數 (雙倉庫設定) ---
+# 1. 資料來源：去 auto-updater 拿股價大檔
+DATA_REPO = "gtty2003-ux/v32-auto-updater" 
+DATA_FILE = "v32_dataset.csv"
+
+# 2. 庫存來源：在庫存倉庫 (自己) 存取庫存檔
+HOLDING_REPO = "gtty2003-ux/v32-data"
+HOLDINGS_FILE = "holdings.csv"
 
 # --- 樣式設定 ---
 st.markdown("""
@@ -64,15 +67,15 @@ def color_change(val):
     elif val < 0: return 'color: #388e3c; background-color: rgba(0,255,0,0.1); font-weight: bold;'
     return 'color: gray'
 
-# --- 核心：從 GitHub 讀取 CSV ---
+# --- 核心 1：從 Auto-Updater 讀取股價資料 ---
 @st.cache_data(ttl=1800)
 def load_data_from_github():
-    """從 GitHub 私有倉庫讀取 V32 數據"""
+    """從 v32-auto-updater 讀取 V32 數據"""
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
         
-        # 使用 GitHub API 讀取 Raw Data
-        url = f"https://api.github.com/repos/{REPO_KEY}/contents/{DATA_FILE}"
+        # 注意：這裡使用 DATA_REPO (指向 updater)
+        url = f"https://api.github.com/repos/{DATA_REPO}/contents/{DATA_FILE}"
         headers = {
             "Authorization": f"token {token}",
             "Accept": "application/vnd.github.v3.raw"
@@ -83,7 +86,6 @@ def load_data_from_github():
         if response.status_code == 200:
             df = pd.read_csv(io.StringIO(response.text))
             
-            # 確保欄位型態正確
             df['Code'] = df['Code'].astype(str).str.strip()
             df['Date'] = pd.to_datetime(df['Date'])
             
@@ -94,19 +96,17 @@ def load_data_from_github():
             
             return df
         else:
-            # 如果是 404，代表檔案還沒產生 (可能是第一次執行 Action 還沒跑完)
             if response.status_code == 404:
                 return pd.DataFrame()
-            st.error(f"GitHub 連線失敗: {response.status_code}")
+            st.error(f"GitHub (Data) 連線失敗: {response.status_code} - 請確認 v32-auto-updater 是否有產出檔案")
             return pd.DataFrame()
             
     except Exception as e:
         st.error(f"讀取資料錯誤: {e}")
         return pd.DataFrame()
 
-# --- V32 運算邏輯 ---
+# --- V32 運算邏輯 (不變) ---
 def calculate_v32_score(df_group):
-    # 資料太少不算
     if len(df_group) < 60: return None 
     
     df = df_group.sort_values('Date').reset_index(drop=True)
@@ -115,7 +115,6 @@ def calculate_v32_score(df_group):
     high = df['HighestPrice']
     open_p = df['OpeningPrice']
     
-    # 指標計算
     ma5 = close.rolling(5).mean()
     ma20 = close.rolling(20).mean()
     ma60 = close.rolling(60).mean()
@@ -135,7 +134,6 @@ def calculate_v32_score(df_group):
     vol_ma20 = vol.rolling(20).mean()
     high_20 = high.rolling(20).max()
     
-    # 取最後一天的數據
     i = -1 
     c_now = close.iloc[i]
     if pd.isna(c_now) or c_now == 0: return None
@@ -149,7 +147,6 @@ def calculate_v32_score(df_group):
     v_m5, v_m20 = vol_ma5.iloc[i], vol_ma20.iloc[i]
     o_now = open_p.iloc[i]
     
-    # 評分系統
     t_score = 60
     if c_now > m20: t_score += 5
     if m20 > m20_prev: t_score += 5
@@ -167,25 +164,18 @@ def calculate_v32_score(df_group):
     if v_now > v_m20 * 1.5: v_score += 5
     v_score = min(100, v_score)
     
-    # 攻擊分 (簡易版: 70% 技術 + 30% 量能)
     raw_today = (t_score * 0.7) + (v_score * 0.3)
     
-    return {
-        '技術分': t_score, 
-        '量能分': v_score, 
-        '攻擊分': raw_today, 
-        '收盤': c_now
-    }
+    return {'技術分': t_score, '量能分': v_score, '攻擊分': raw_today, '收盤': c_now}
 
 @st.cache_data(ttl=1800)
 def process_data():
     raw_df = load_data_from_github()
-    if raw_df.empty: return pd.DataFrame(), "無法讀取數據，請確認 GitHub Update Action 是否執行成功，或 v32_dataset.csv 是否存在。"
+    if raw_df.empty: return pd.DataFrame(), "無法讀取數據 (v32-auto-updater)，請確認 CSV 是否存在。"
     
     results = []
     grouped = raw_df.groupby('Code')
     
-    # 對每一檔股票算分
     for code, group in grouped:
         name = group['Name'].iloc[-1]
         score_data = calculate_v32_score(group)
@@ -196,7 +186,7 @@ def process_data():
             
     return pd.DataFrame(results), None
 
-# --- 即時報價 (TWSE + Yahoo) ---
+# --- 即時報價 ---
 @st.cache_data(ttl=60)
 def get_realtime_quotes(code_list):
     if not code_list: return {}
@@ -236,7 +226,6 @@ def get_realtime_quotes(code_list):
             time.sleep(0.2)
         except: pass
 
-    # Yahoo 備援
     missing_codes = [c for c in code_list if c not in realtime_data]
     if missing_codes:
         try:
@@ -271,7 +260,6 @@ def merge_realtime_data(df):
     df['即時價'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('即時價', np.nan))
     df['漲跌幅%'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('漲跌幅%', np.nan))
     df['當日量'] = df['代號'].map(lambda x: rt_data.get(x, {}).get('當日量', 0))
-    # 若無即時價，回退使用收盤價
     df['即時價'] = df['即時價'].fillna(df['收盤'])
     df['漲跌幅%'] = df['漲跌幅%'].fillna(0)
     df['當日量'] = df['當日量'].fillna(0)
@@ -317,15 +305,15 @@ def get_chip_analysis(symbol_list):
     status.empty()
     return pd.DataFrame(chip_data)
 
-# --- 庫存存取 (PyGithub) ---
+# --- 核心 2：庫存存取 (v32-data 自己) ---
 def load_holdings():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
         g = Github(token)
-        repo = g.get_repo(REPO_KEY)
+        # 注意：這裡使用 HOLDING_REPO (指向自己)
+        repo = g.get_repo(HOLDING_REPO)
         contents = repo.get_contents(HOLDINGS_FILE)
         df = pd.read_csv(contents.download_url)
-        # 欄位正規化
         rename_map = {'代號': '股票代號', 'Code': '股票代號', 'Symbol': '股票代號', '股數': '持有股數', 'Shares': '持有股數', '均價': '買入均價', '成本': '買入均價', 'Price': '買入均價', 'Cost': '買入均價'}
         df = df.rename(columns=rename_map)
         df['股票代號'] = df['股票代號'].astype(str).str.strip()
@@ -338,7 +326,8 @@ def save_holdings(df):
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
         g = Github(token)
-        repo = g.get_repo(REPO_KEY)
+        # 注意：這裡使用 HOLDING_REPO (指向自己)
+        repo = g.get_repo(HOLDING_REPO)
         csv_content = df.to_csv(index=False)
         try:
             contents = repo.get_contents(HOLDINGS_FILE)
@@ -352,16 +341,13 @@ def save_holdings(df):
 # --- 篩選與排序邏輯 ---
 def get_stratified_selection(df):
     if df.empty: return df, []
-    # 確保數值型態
     cols = ['攻擊分', '技術分', '量能分']
     for c in cols: df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
     
-    # 篩選標準：技術分>60, 量能>60, 攻擊分>80
     mask = (df['技術分'] >= 60) & (df['量能分'] >= 60) & (df['攻擊分'] >= 80)
     filtered = df[mask].copy()
     if filtered.empty: return pd.DataFrame(), ["無符合條件標的"]
     
-    # 分級
     b_a = filtered[filtered['攻擊分'] >= 90].sort_values('攻擊分', ascending=False).head(5)
     b_b = filtered[(filtered['攻擊分'] >= 85) & (filtered['攻擊分'] < 90)].sort_values('攻擊分', ascending=False).head(5)
     b_c = filtered[(filtered['攻擊分'] >= 80) & (filtered['攻擊分'] < 85)].sort_values('攻擊分', ascending=False).head(5)
@@ -377,7 +363,7 @@ def get_raw_top10(df):
 
 # --- 主程式 ---
 def main():
-    st.title("⚔️ V32 戰情室 (GitHub Core)")
+    st.title("⚔️ V32 戰情室 (Dual Core)")
     
     if 'inventory' not in st.session_state: st.session_state['inventory'] = load_holdings()
     if 'input_key_counter' not in st.session_state: st.session_state['input_key_counter'] = 0
@@ -386,16 +372,15 @@ def main():
         st.cache_data.clear()
         st.rerun()
 
-    # 1. 載入 GitHub 資料並運算分數
-    with st.spinner("正在從 GitHub 讀取核心數據..."):
+    # 1. 載入資料 (從 Updater Repo)
+    with st.spinner("正在讀取核心數據 (v32-auto-updater)..."):
         v32_df, err = process_data()
         
     if err: st.error(err)
     if not v32_df.empty:
-        # 過濾特殊股
         v32_df['cat'] = v32_df.apply(lambda r: 'Special' if ('債' in str(r.get('名稱', '')) or 'KY' in str(r.get('名稱', '')) or str(r['代號']).startswith(('00','91'))) else 'General', axis=1)
         v32_df = v32_df[v32_df['cat'] == 'General']
-        st.caption(f"分析完成: 共 {len(v32_df)} 檔股票 | 資料來源: GitHub (v32_dataset.csv)")
+        st.caption(f"分析完成: 共 {len(v32_df)} 檔股票 | 資料來源: v32-auto-updater")
 
     tab_strat, tab_raw, tab_inv = st.tabs(["🎯 V32 精選", "🏆 全市場 Top 10", "💼 庫存管理"])
     fmt_score = {'即時價':'{:.2f}', '漲跌幅%':'{:+.2f}%', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '當日量':'{:,}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
@@ -406,7 +391,6 @@ def main():
             final_df, stats = get_stratified_selection(v32_df)
             st.info(f"🎯 戰略結構：{' | '.join(stats)}")
             if not final_df.empty:
-                # 取得即時報價 (針對篩選出來的少數股票)
                 final_df = merge_realtime_data(final_df)
                 
                 col_btn, col_info = st.columns([1, 4])
@@ -432,7 +416,7 @@ def main():
                     use_container_width=True
                 )
             else: st.warning("無符合 V32 條件標的")
-        else: st.warning("暫無資料 (請確認 GitHub Action 是否已成功執行並產生 CSV)")
+        else: st.warning("暫無資料 (請確認 v32-auto-updater 是否已執行 Action)")
 
     # === Tab 2: Top 10 ===
     with tab_raw:
@@ -464,12 +448,10 @@ def main():
     with tab_inv:
         st.subheader("📝 庫存交易管理")
         
-        # 簡單載入名稱對照
         name_map = {}
         if not v32_df.empty:
             name_map = dict(zip(v32_df['代號'], v32_df['名稱']))
 
-        # 交易介面
         input_key = st.session_state['input_key_counter']
         c1, c2 = st.columns(2)
         with c1:
@@ -485,7 +467,6 @@ def main():
         if st.button("💾 執行交易並儲存", type="primary"):
             current_inv = st.session_state['inventory'].copy()
             has_update = False
-            # 買入邏輯
             for _, row in edited_buy.iterrows():
                 code = str(row['股票代號']).strip()
                 shares = int(row['持有股數']) if row['持有股數'] else 0
@@ -504,7 +485,6 @@ def main():
                     else:
                         new_row = pd.DataFrame([{'股票代號': code, '持有股數': shares, '買入均價': price}])
                         current_inv = pd.concat([current_inv, new_row], ignore_index=True)
-            # 賣出邏輯
             for _, row in edited_sell.iterrows():
                 code = str(row['股票代號']).strip()
                 shares = int(row['持有股數']) if row['持有股數'] else 0
@@ -540,7 +520,6 @@ def main():
                 
                 rt_info = inv_rt.get(code, {})
                 curr = rt_info.get('即時價', 0)
-                # 使用 V32 檔案的名稱，若無則用即時盤名稱
                 name = name_map.get(code, rt_info.get('名稱', code)) 
                 sc = score_map.get(code, 0)
                 
