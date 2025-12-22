@@ -78,53 +78,33 @@ def color_action(val):
         return 'color: #1b5e20; font-weight: bold;'
     return ''
 
-# --- Google Drive 連線 (終極三引號版) ---
+# --- Google Drive 連線 (JSON 解析終極版) ---
 @st.cache_resource
 def get_drive_service():
-    # 使用三引號 (""") 來包住私鑰，這是最穩定的格式，不會有換行符號問題
-    private_key_str = """-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7kO+PAF/3PQ+x
-ZWMwLuJbv/55RHgkcknK67FV2JWLDhWiASYnB/bp4AjCi1tBGuO/vvHk1U5gFElB
-TWbZmcr9BNzsC27MS9CxYM80VhhtOGMzM2+h3sBLk7H+Whj4yIaI+cf36/lL/WjL
-G2gHb3U0JXeC1JsDoDpUfBlJ/W7UswLMUF1ANorCocgsFg59gMVhWgzYKFs+lI1L
-Fg1M3xu83iZKzoBrrXYHF+qOIOZtRVfkGYKMEvUPiUkOavXrHTFkD3ulGIbSEwa4
-hDXUoDVqPtMDgvMUVc8G8DlMVtFDUOOcEaKmJxY7NgWnXicQdm9SjmH/KCQYiFaj
-ptJXMKlnAgMBAAECggEADR6OIwp7q+dxeY8F6RDedFxxiDnpzWLRFoh11vNXQmqx
-yKsb6A7+jk1FT5Y/w8YFuBu6/66L1NyWYyLu1rmTIS995GTIUzHaXw3OcHK1Mq6H
-AcXPQRs7iA3EnW3f4UblYh9WhVjUDySid9Jq7Fo3cHZObbBBR3elnNMxUaOQZQAh
-vAhbYJeFzACp8Tm5LFMAdjsS2VZrVGtSOIthAv7YSC+vXe3OmCGLuM6EAGIIBMP3
-XToWhY6r0uQfm9d0UfI0xiorWSGsNkBZPK6+HAJ6QVMQwMADHx3/4zOq1v7L0bAe
-+p6DIhCUasA475s4JQkTCCnQC2NM7aw2t/n1Esf3gQKBgQDkLd52g9Ai2facS5wA
-r6gOUUgE+Oh0Tv43PA2yc6pjtqOznx3QYAhY6fqaNgGCVsAwU1ZwnOzDY5LurZfy
-J9b0UZcd1spN4nwGEobZtdxurzxIdUAoTf6/6ClGGXSpILLgAi06Q+Vu8f1zpx0Y
-npBGSiTGqt8f5IXtko2WyHS0TwKBgQDSb2rJMi+LAcYXqqjUufSYKq3kxw2aYSR8
-Q+K9Opwv0Cu6u+6JSqHFakfvdNNq21LisjBR16CIQhSYCNzVqsjEbFSKTHYiJ6Dc
-Lc8vvHE4ceOZFgljnoPKsnW/OX5enUJjgQNcSexnqJIqXA6VzWtLXXmtzZ7HY02r
-ZtdGdlO7aQKBgHz8SxDr3sRYU+cE22zcytcc2rAuj1W2NzWWJYKMLNb1ofGvxKrx
-D2F0uJpj3qvATQGrhHum2WGlV0R5vfMcs3ecgYQMtT+4QWsqFseGADp4rjKaVww8
-vL/tsT3+j5JcoN5nEtMJgdElqEkDTsK/iBOYZVCVJCbaDCo3zmq7XoGtAoGBAKqw
-s1alfYjslGjIBhAfEfaHz+udRjxuBXFCg11oeB4UZhQeslrsjZGbJuRlx8OKSY4W
-aTlJhS5hI2E69x3dXOJu2Jghc0U7DbDq+37GBLR7NNkM1erXPiGhZf8JPKa0OpCJ
-qlcmozplssHnT/FU4W4NUVCYU+15cBvS3FWMT1jZAoGAeVwwQjhPmyMV0QWfGOrq
-+W2MLdpY0x7nyrogcTayRa5e3rvWQpMYysi5wKNeC2h1SBrqt9uy0TzxmncfuzFp
-c/lTfnLyqlcTki+LOxdO3t1PhiBEdtwPKgYUy1pVFzobshJFUpT1rU5sqZ33Qrk0
-PXtnDwQ6aHVBjNXbvFCu3D4=
------END PRIVATE KEY-----"""
-
-    service_account_info = {
-      "type": "service_account",
-      "project_id": "v32-stock-bot",
-      "private_key_id": "d66f9a30ef7bae397ac2bbbdd24bb7919e96aa79",
-      "private_key": private_key_str,
-      "client_email": "v32-auto-updater@v32-stock-bot.iam.gserviceaccount.com",
-      "client_id": "109928194171724697312",
-      "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-      "token_uri": "https://oauth2.googleapis.com/token",
-      "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-      "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/v32-auto-updater%40v32-stock-bot.iam.gserviceaccount.com"
-    }
+    # 我們把 JSON 內容當作純文字放入，並使用 json.loads 讓 Python 自動處理格式轉換
+    # 這樣可以完美避開所有 "換行符號" 與 "斜線" 的問題
+    
+    json_str = r'''
+{
+  "type": "service_account",
+  "project_id": "v32-stock-bot",
+  "private_key_id": "d66f9a30ef7bae397ac2bbbdd24bb7919e96aa79",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC7kO+PAF/3PQ+x\nZWMwLuJbv/55RHgkcknK67FV2JWLDhWiASYnB/bp4AjCi1tBGuO/vvHk1U5gFElB\nTWbZmcr9BNzsC27MS9CxYM80VhhtOGMzM2+h3sBLk7H+Whj4yIaI+cf36/lL/WjL\nG2gHb3U0JXeC1JsDoDpUfBlJ/W7UswLMUF1ANorCocgsFg59gMVhWgzYKFs+lI1L\nFg1M3xu83iZKzoBrrXYHF+qOIOZtRVfkGYKMEvUPiUkOavXrHTFkD3ulGIbSEwa4\nhDXUoDVqPtMDgvMUVc8G8DlMVtFDUOOcEaKmJxY7NgWnXicQdm9SjmH/KCQYiFaj\nptJXMKlnAgMBAAECggEADR6OIwp7q+dxeY8F6RDedFxxiDnpzWLRFoh11vNXQmqx\nyKsb6A7+jk1FT5Y/w8YFuBu6/66L1NyWYyLu1rmTIS995GTIUzHaXw3OcHK1Mq6H\nAcXPQRs7iA3EnW3f4UblYh9WhVjUDySid9Jq7Fo3cHZObbBBR3elnNMxUaOQZQAh\nvAhbYJeFzACp8Tm5LFMAdjsS2VZrVGtSOIthAv7YSC+vXe3OmCGLuM6EAGIIBMP3\nXToWhY6r0uQfm9d0UfI0xiorWSGsNkBZPK6+HAJ6QVMQwMADHx3/4zOq1v7L0bAe\n+p6DIhCUasA475s4JQkTCCnQC2NM7aw2t/n1Esf3gQKBgQDkLd52g9Ai2facS5wA\nr6gOUUgE+Oh0Tv43PA2yc6pjtqOznx3QYAhY6fqaNgGCVsAwU1ZwnOzDY5LurZfy\nJ9b0UZcd1spN4nwGEobZtdxurzxIdUAoTf6/6ClGGXSpILLgAi06Q+Vu8f1zpx0Y\nnpBGSiTGqt8f5IXtko2WyHS0TwKBgQDSb2rJMi+LAcYXqqjUufSYKq3kxw2aYSR8\nQ+K9Opwv0Cu6u+6JSqHFakfvdNNq21LisjBR16CIQhSYCNzVqsjEbFSKTHYiJ6Dc\nLc8vvHE4ceOZFgljnoPKsnW/OX5enUJjgQNcSexnqJIqXA6VzWtLXXmtzZ7HY02r\nZtdGdlO7aQKBgHz8SxDr3sRYU+cE22zcytcc2rAuj1W2NzWWJYKMLNb1ofGvxKrx\nD2F0uJpj3qvATQGrhHum2WGlV0R5vfMcs3ecgYQMtT+4QWsqFseGADp4rjKaVww8\nvL/tsT3+j5JcoN5nEtMJgdElqEkDTsK/iBOYZVCVJCbaDCo3zmq7XoGtAoGBAKqw\ns1alfYjslGjIBhAfEfaHz+udRjxuBXFCg11oeB4UZhQeslrsjZGbJuRlx8OKSY4W\naTlJhS5hI2E69x3dXOJu2Jghc0U7DbDq+37GBLR7NNkM1erXPiGhZf8JPKa0OpCJ\nqlcmozplssHnT/FU4W4NUVCYU+15cBvS3FWMT1jZAoGAeVwwQjhPmyMV0QWfGOrq\n+W2MLdpY0x7nyrogcTayRa5e3rvWQpMYysi5wKNeC2h1SBrqt9uy0TzxmncfuzFp\nc/lTfnLyqlcTki+LOxdO3t1PhiBEdtwPKgYUy1pVFzobshJFUpT1rU5sqZ33Qrk0\nPXtnDwQ6aHVBjNXbvFCu3D4=\\n-----END PRIVATE KEY-----\\n",
+  "client_email": "v32-auto-updater@v32-stock-bot.iam.gserviceaccount.com",
+  "client_id": "109928194171724697312",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/v32-auto-updater%40v32-stock-bot.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}
+'''
 
     try:
+        # 關鍵步驟：使用 json.loads 將字串轉換為 Python 字典
+        # 這會自動將 \n 轉換為正確的換行符號，Google 就能讀懂了
+        service_account_info = json.loads(json_str)
+        
         creds = service_account.Credentials.from_service_account_info(
             service_account_info, 
             scopes=['https://www.googleapis.com/auth/drive.readonly']
