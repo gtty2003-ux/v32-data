@@ -210,7 +210,6 @@ def get_chip_analysis(symbol_list):
 
 # --- V32 運算邏輯 (重度運算，設定長快取) ---
 def calculate_indicators(hist):
-    # (此函數保持原樣，因為是核心邏輯)
     if len(hist) < 65: return 0, 0, 0, "0/5"
     close = hist['Close']
     vol = hist['Volume']
@@ -331,7 +330,7 @@ def load_and_process_data():
     except Exception as e:
         return pd.DataFrame(), str(e)
 
-# --- GitHub 庫存存取 ---
+# --- GitHub 庫存存取 (已修復 KeyError 問題) ---
 def load_holdings():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
@@ -339,11 +338,23 @@ def load_holdings():
         repo = g.get_repo(REPO_KEY)
         contents = repo.get_contents(FILE_PATH)
         df = pd.read_csv(contents.download_url)
+        
+        # --- 自動校正欄位名稱 (防止 KeyError) ---
+        rename_map = {
+            '代號': '股票代號', 'Code': '股票代號', 'Symbol': '股票代號',
+            '股數': '持有股數', 'Shares': '持有股數', 
+            '均價': '買入均價', '成本': '買入均價', 'Price': '買入均價', 'Cost': '買入均價'
+        }
+        df = df.rename(columns=rename_map)
+        # -------------------------------------
+        
         df['股票代號'] = df['股票代號'].astype(str).str.strip()
+        
         # 確保必要欄位存在
         for c in ["股票代號", "買入均價", "持有股數"]:
             if c not in df.columns: 
                 df[c] = 0.0 if "價" in c else (0 if "股" in c else "")
+                
         return df[["股票代號", "買入均價", "持有股數"]]
     except:
         return pd.DataFrame(columns=["股票代號", "買入均價", "持有股數"])
@@ -394,6 +405,12 @@ def main():
     # 初始化 session state
     if 'inventory' not in st.session_state:
         st.session_state['inventory'] = load_holdings()
+        
+    # --- 安全檢查：確保載入的庫存有正確欄位 (防止舊數據導致 KeyError) ---
+    if '股票代號' not in st.session_state['inventory'].columns:
+        st.session_state['inventory'] = load_holdings()
+    # -------------------------------------------------------------
+
     if 'input_key_counter' not in st.session_state:
         st.session_state['input_key_counter'] = 0
     
