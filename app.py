@@ -336,23 +336,56 @@ def get_risk_analysis_batch(code_list):
     progress_bar.empty()
     return pd.DataFrame.from_dict(risk_data, orient='index').reset_index().rename(columns={'index': '代號'})
 
-# --- 籌碼分析 ---
+# --- 籌碼分析 (修正版) ---
 def get_chip_analysis(symbol_list):
     chip_data = []
     dl = DataLoader()
     p_bar = st.progress(0)
+    total_steps = len(symbol_list)
+    
     for i, symbol in enumerate(symbol_list):
-        p_bar.progress((i + 1) / len(symbol_list))
-        try:
-            df = dl.taiwan_stock_institutional_investors(stock_id=symbol, start_date=(datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d'))
-            if df.empty:
-                chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '🟡 一般輪動'})
-            else:
-                latest = df[df['date'] == df['date'].iloc[-1]]
-                f_buy = int((latest[latest['name'].str.contains('Foreign')]['buy'].sum() - latest[latest['name'].str.contains('Foreign')]['sell'].sum()) // 1000)
-                t_buy = int((latest[latest['name'] == 'Investment_Trust']['buy'].sum() - latest[latest['name'] == 'Investment_Trust']['sell'].sum()) // 1000)
+        p_bar.progress((i + 1) / total_steps)
+        
+        # 嘗試最多 2 次 (Retry 機制)
+        success = False
+        error_msg = ""
+        
+        for attempt in range(2):
+            try:
+                # 抓取過去 10 天資料
+                start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
+                df = dl.taiwan_stock_institutional_investors(stock_id=symbol, start_date=start_date)
                 
-                status_str = "🔴 投信買 " if t_buy > 0 else ("🟢 投信賣 " if t_buy < 0 else "")
+                if df.empty:
+                    chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '🟡 無數據'})
+                    success = True
+                    break
+                
+                # 取得最新一天的資料
+                latest_date = df['date'].max()
+                latest = df[df['date'] == latest_date]
+                
+                # 計算買賣超 (FinMind 的 name 有時候會變，這裡加強容錯)
+                f_buy = 0
+                t_buy = 0
+                
+                # 外資 (Foreign)
+                foreign_mask = latest['name'].str.contains('Foreign', case=False, na=False)
+                if foreign_mask.any():
+                    f_row = latest[foreign_mask]
+                    f_buy = int((f_row['buy'].sum() - f_row['sell'].sum()) // 1000)
+                
+                # 投信 (Investment Trust)
+                trust_mask = latest['name'].str.contains('Investment_Trust', case=False, na=False)
+                if trust_mask.any():
+                    t_row = latest[trust_mask]
+                    t_buy = int((t_row['buy'].sum() - t_row['sell'].sum()) // 1000)
+                
+                # 判斷動向標籤
+                status_str = ""
+                if t_buy > 0: status_str += "🔴 投信買 "
+                elif t_buy < 0: status_str += "🟢 投信賣 "
+                
                 if f_buy > 1000: status_str += "🔥 外資大買 "
                 elif f_buy < -1000: status_str += "🧊 外資倒貨 "
                 
@@ -361,12 +394,31 @@ def get_chip_analysis(symbol_list):
                 elif t_buy < 0 and f_buy > 0: tag = "⚔️ 土洋對作(外)"
                 elif t_buy < 0 and f_buy < 0: tag = "☠️ 主力棄守"
                 else: tag = "🟡 一般輪動"
-                chip_data.append({'代號': symbol, '投信(張)': t_buy, '外資(張)': f_buy, '主力動向': f"{tag} | {status_str}"})
-            time.sleep(0.05)
-        except: chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ Error'})
+                
+                final_status = f"{tag} | {status_str}" if status_str else tag
+                
+                chip_data.append({
+                    '代號': symbol, 
+                    '投信(張)': t_buy, 
+                    '外資(張)': f_buy, 
+                    '主力動向': final_status
+                })
+                success = True
+                break # 成功就跳出重試迴圈
+
+            except Exception as e:
+                error_msg = str(e)
+                time.sleep(1) # 失敗休息一下再試
+        
+        if not success:
+            print(f"❌ 股票 {symbol} 籌碼抓取失敗: {error_msg}") # 在後台印出錯誤
+            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ Error'})
+        
+        # --- 關鍵修正：增加休息時間避免被鎖 IP ---
+        time.sleep(1.5) 
+        
     p_bar.empty()
     return pd.DataFrame(chip_data)
-
 # --- 庫存管理 ---
 def load_holdings():
     try:
