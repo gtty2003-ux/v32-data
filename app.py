@@ -128,6 +128,31 @@ def calculate_v32_score(df_group):
 def process_data():
     raw_df = load_data_from_github()
     if raw_df.empty: return pd.DataFrame(), pd.DataFrame(), "無法讀取數據"
+    
+    # --- 新增：股票過濾邏輯 (在計算前先淘汰) ---
+    # 目的：淘汰非普通股 (ETF, DR, KY, ETN, 特別股, 權證) 以及 金融股 (28xx)
+    
+    # 1. 預處理：轉成字串並去除空白
+    raw_df['Code_Str'] = raw_df['Code'].astype(str).str.strip()
+    raw_df['Name_Str'] = raw_df['Name'].astype(str).str.strip()
+
+    # 2. 定義保留條件：必須是 4 位數 且 純數字 (排除 6 位數權證、含英文字的特別股)
+    mask_common = (raw_df['Code_Str'].str.len() == 4) & (raw_df['Code_Str'].str.isdigit())
+
+    # 3. 定義排除條件
+    mask_exclude = (
+        raw_df['Code_Str'].str.startswith('28') |  # 金融股
+        raw_df['Code_Str'].str.startswith('00') |  # ETF
+        raw_df['Code_Str'].str.startswith('91') |  # DR 股
+        raw_df['Code_Str'].str.startswith('02') |  # ETN
+        raw_df['Name_Str'].str.contains('KY')   |  # KY 股
+        raw_df['Name_Str'].str.contains('創')      # 創新板
+    )
+
+    # 4. 應用過濾 (保留普通股 且 不在排除名單內)
+    raw_df = raw_df[mask_common & ~mask_exclude]
+    # ---------------------------------------------
+
     results = []
     for code, group in raw_df.groupby('Code'):
         res = calculate_v32_score(group)
