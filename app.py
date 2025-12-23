@@ -302,21 +302,30 @@ def main():
                 buy_price = r['買入均價']
                 qty = r['持有股數']
                 
-                # --- 核心邏輯：從買入後起算的高點 ---
-                hist_highs = raw_df[raw_df['Code'] == code]['HighestPrice'].tolist()
-                # 只抓取股價大於買入價之後的高點，模擬「買入後波段高點」
-                wave_high = max([h for h in hist_highs if h >= buy_price] + [curr])
-                
-                pl = (curr - buy_price) * qty
-                roi = (pl / (buy_price * qty) * 100) if buy_price > 0 else 0
-                sc = score_map.get(code, 0)
-                
-                # 建議操作判斷
-                if curr > buy_price and curr < (wave_high * 0.9):
-                    action = "💰 停利 (回落10%)"
-                elif roi < -10: action = "🛑 停損"
-                elif sc >= 60: action = "🟢 續抱"
-                else: action = "🔻 賣出"
+                # ---------------------------------------------------------
+# V32 建議操作判斷 (紅綠燈戰法)
+# 變數需求: 
+#   curr: 目前股價
+#   ma20: 20日均線 (月線)
+#   sc:   攻擊分 (Attack Score)
+# ---------------------------------------------------------
+
+# 優先判斷是否 "活著" (是否在月線之上)
+if curr < ma20:
+    # 🔴 紅燈：地板塌了 (趨勢轉空)
+    # 條件：股價跌破月線，不管分數多少，無條件離場
+    action = "🔴 停損/清倉 (破月線)"
+
+elif sc >= 60:
+    # 🟢 綠燈：趨勢多頭 + 引擎運轉 (動能強)
+    # 條件：股價 > 月線 且 攻擊分 >= 60
+    action = "🟢 續抱 (多頭動能)"
+
+else:
+    # 🟡 黃燈：趨勢還在 但 引擎熄火 (動能弱)
+    # 條件：股價 > 月線 但 攻擊分 < 60 (隱含條件)
+    # 意義：資金效率變差，進入盤整，建議換股
+    action = "🟡 停利/減碼 (動能熄火)"
 
                 res.append({
                     '代號': code, '名稱': name_map.get(code, code), 
