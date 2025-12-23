@@ -268,7 +268,11 @@ def main():
         # 建立快速查詢字典
         name_map = dict(zip(v32_df['代號'], v32_df['名稱'])) if not v32_df.empty else {}
         score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
-        ma20_map = v32_df.set_index('代號')['20MA'].to_dict() if not v32_df.empty else {}
+       # 如果資料裡有 '20MA' 就讀取，沒有的話就暫時用 0 代替，避免當機
+if '20MA' in v32_df.columns:
+    ma20_map = v32_df.set_index('代號')['20MA'].to_dict()
+else:
+    ma20_map = {code: 0 for code in v32_df['代號']}
 
         c1, c2 = st.columns(2)
         with c1:
