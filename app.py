@@ -138,23 +138,30 @@ def process_data():
 
 # --- 強化的即時報價模組 (三層備援) ---
 def fetch_price_twse(code):
-    """第一層：嘗試從證交所/櫃買中心抓取 (最準)"""
+    """第一層：證交所/櫃買 (最準)"""
     try:
         stock = twstock.Realtime(code)
-        if stock.realtime['latest_trade_price']:
-            return float(stock.realtime['latest_trade_price'])
-        # 如果還沒開盤或抓不到，嘗試抓開盤價或昨收
-        elif stock.realtime['open']:
+        # 檢查是否抓到資料 (success=True 且有價格)
+        if stock.realtime.get('success') and stock.realtime.get('latest_trade_price'):
+            price = float(stock.realtime['latest_trade_price'])
+            if price > 0: return price
+        # 若盤中抓不到，嘗試 fallback 到開盤價
+        if stock.realtime.get('open'):
              return float(stock.realtime['open'])
         return None
     except:
         return None
 
 def fetch_price_yahoo(code):
-    """第二層：嘗試從 Yahoo 股市抓取"""
+    """第二層：Yahoo 股市 (透過 yfinance Ticker)"""
     try:
-        # 改用 yfinance 的快速模式作為替代 Yahoo 來源 (其實 yfinance 也是爬 yahoo)
         ticker = yf.Ticker(f"{code}.TW")
+        # 嘗試取得盤中價格 (regularMarketPrice)
+        info = ticker.info
+        if 'currentPrice' in info: return float(info['currentPrice'])
+        if 'regularMarketPrice' in info: return float(info['regularMarketPrice'])
+        
+        # 失敗則抓歷史最後一筆
         data = ticker.history(period="1d", interval="1m")
         if not data.empty:
             return float(data['Close'].iloc[-1])
@@ -162,10 +169,9 @@ def fetch_price_yahoo(code):
     except:
         return None
 
-def fetch_price_google_yf(code):
-    """第三層：Yfinance (備用)"""
+def fetch_price_google_backup(code):
+    """第三層：Google 替代方案 (透過 yfinance download 強制抓取)"""
     try:
-        # 這裡作為最後手段
         data = yf.download(f"{code}.TW", period="1d", interval="1m", progress=False)
         if not data.empty:
              return float(data['Close'].iloc[-1])
@@ -173,13 +179,12 @@ def fetch_price_google_yf(code):
     except:
         return None
 
-# 我們不使用 cache_data，而是使用 st.session_state 手動控制更新頻率
 def get_realtime_quotes_robust(code_list):
     if not code_list: return {}
     clean_codes = [str(c).strip().split('.')[0] for c in code_list]
     realtime_data = {}
     
-    # 建立進度條，因為單檔抓取比較慢
+    # 建立進度條
     progress_bar = st.progress(0)
     total = len(clean_codes)
     
@@ -193,9 +198,9 @@ def get_realtime_quotes_robust(code_list):
         if price is None:
             price = fetch_price_yahoo(code)
             
-        # 3. 還是失敗，嘗試 Google
+        # 3. 還是失敗，嘗試 Google Backup
         if price is None:
-             price = fetch_price_google_yf(code)
+             price = fetch_price_google_backup(code)
 
         if price is not None:
             realtime_data[code] = {'即時價': round(price, 2)}
@@ -254,9 +259,8 @@ def save_holdings(df):
         repo.update_file(contents.path, f"Update {get_taiwan_time()}", csv_content, contents.sha)
     except: pass
 
-# --- Tab 1 & 2 表格渲染 (修改重點：加入即時報價更新功能) ---
+# --- Tab 1 & 2 表格渲染 ---
 def display_v32_tables(df, price_limit, suffix):
-    # 篩選 V32 邏輯
     filtered = df[(df['收盤'] <= price_limit) & (df['攻擊分'] >= 86) & (df['攻擊分'] <= 92)].sort_values('攻擊分', ascending=False)
     if filtered.empty: return st.warning("無符合標的")
 
@@ -268,16 +272,15 @@ def display_v32_tables(df, price_limit, suffix):
     # --- 功能按鈕區 ---
     c_scan, c_update, c_info = st.columns([1, 1, 2])
     
-    # 1. 籌碼掃描按鈕
     with c_scan:
         if st.button(f"🚀 籌碼掃描 (Top {len(target_codes)})", key=f"scan_{suffix}"):
             chip_df = get_chip_analysis(target_codes)
             filtered = pd.merge(filtered, chip_df, on='代號', how='left')
 
-    # 2. 更新即時價按鈕 (新功能)
+    # --- 即時更新按鈕 (修復無反饋問題) ---
     with c_update:
         now = time.time()
-        time_diff = now - st.session_state['last_update_time']
+        time_diff = now - st.session_state.get('last_update_time', 0)
         btn_label = "🔄 更新即時價"
         btn_disabled = False
         if time_diff < 60:
@@ -285,24 +288,31 @@ def display_v32_tables(df, price_limit, suffix):
             btn_disabled = True
             
         if st.button(btn_label, disabled=btn_disabled, key=f"update_{suffix}", type="primary"):
-            with st.spinner(f"🚀 更新 Top {len(target_codes)} 檔股價中..."):
+            with st.spinner(f"🚀 正在從 證交所/Yahoo/Google 同步 Top {len(target_codes)} 檔..."):
                 fresh_quotes = get_realtime_quotes_robust(target_codes)
-                # 更新到全域 session，這樣切換 tab 也能看到
+                
+                # 同步更新到全域 session
                 current_quotes = st.session_state.get('realtime_quotes', {})
                 current_quotes.update(fresh_quotes)
                 st.session_state['realtime_quotes'] = current_quotes
                 st.session_state['last_update_time'] = time.time()
+                
+                # 顯示成功訊息 (Toast)
+                st.toast(f"✅ 已成功更新 {len(fresh_quotes)} 檔即時股價！", icon="🔄")
+                time.sleep(1) # 稍等一下讓使用者看到
                 st.rerun()
 
     with c_info:
-        if st.session_state['last_update_time'] > 0:
+        if st.session_state.get('last_update_time', 0) > 0:
             last_time_str = datetime.fromtimestamp(st.session_state['last_update_time']).strftime('%H:%M:%S')
             st.caption(f"最後更新: {last_time_str}")
 
-    # --- 資料合併邏輯 ---
-    # 從 session_state 讀取最新的即時價，如果沒有則用收盤價
+    # --- 資料合併邏輯 (確保顯示即時價) ---
     saved_quotes = st.session_state.get('realtime_quotes', {})
+    
+    # 強制使用 session 中的資料覆蓋
     filtered['即時價'] = filtered['代號'].map(lambda x: saved_quotes.get(x, {}).get('即時價', np.nan))
+    # 只有當真的沒有即時價時，才用收盤價填充
     filtered['即時價'] = filtered['即時價'].fillna(filtered['收盤'])
 
     base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
@@ -326,7 +336,7 @@ def main():
     st.title("⚔️ V32 戰情室 (Dual Core)")
     if 'inventory' not in st.session_state: st.session_state['inventory'] = load_holdings()
     
-    # 初始化即時報價的 session state (共用)
+    # 初始化即時報價的 session state
     if 'realtime_quotes' not in st.session_state: st.session_state['realtime_quotes'] = {}
     if 'last_update_time' not in st.session_state: st.session_state['last_update_time'] = 0
     
@@ -348,7 +358,7 @@ def main():
         col_btn, col_info = st.columns([1, 4])
         with col_btn:
             now = time.time()
-            time_diff = now - st.session_state['last_update_time']
+            time_diff = now - st.session_state.get('last_update_time', 0)
             btn_label = "🔄 更新即時股價"
             btn_disabled = False
             
@@ -358,20 +368,22 @@ def main():
             
             if st.button(btn_label, disabled=btn_disabled, type="primary", key="btn_inv_update"):
                 if not st.session_state['inventory'].empty:
-                    with st.spinner("🚀 正從證交所/Yahoo/Google 同步最新報價..."):
+                    with st.spinner("🚀 正在同步庫存股價 (證交所/Yahoo/Google)..."):
                         codes = st.session_state['inventory']['股票代號'].tolist()
                         fresh_quotes = get_realtime_quotes_robust(codes)
                         
-                        # 更新到全域 session
+                        # 同步更新到全域
                         current_quotes = st.session_state.get('realtime_quotes', {})
                         current_quotes.update(fresh_quotes)
                         st.session_state['realtime_quotes'] = current_quotes
-                        
                         st.session_state['last_update_time'] = time.time()
+                        
+                        st.toast(f"✅ 已成功更新庫存股價！", icon="💼")
+                        time.sleep(1)
                         st.rerun()
         
         with col_info:
-            if st.session_state['last_update_time'] > 0:
+            if st.session_state.get('last_update_time', 0) > 0:
                 last_time_str = datetime.fromtimestamp(st.session_state['last_update_time']).strftime('%H:%M:%S')
                 st.caption(f"最後更新時間: {last_time_str}")
 
@@ -428,8 +440,10 @@ def main():
                 curr = saved_quotes.get(code, {}).get('即時價', r['買入均價'])
                 
                 # 若無資料，嘗試從 v32_df 找收盤價
-                if curr == 0 and not v32_df.empty:
-                     curr = v32_df[v32_df['代號']==code]['收盤'].values[0] if not v32_df[v32_df['代號']==code].empty else 0
+                if (curr == 0 or curr == r['買入均價']) and not v32_df.empty:
+                     backup_price = v32_df[v32_df['代號']==code]['收盤'].values
+                     if len(backup_price) > 0:
+                         curr = backup_price[0]
 
                 buy_price = r['買入均價']
                 qty = r['持有股數']
