@@ -50,14 +50,15 @@ def color_surplus(val):
     if not isinstance(val, (int, float)): return ''
     return 'color: #d32f2f; font-weight: bold;' if val > 0 else ('color: #388e3c; font-weight: bold;' if val < 0 else 'color: black')
 
+# 修改：針對新的紅綠燈邏輯調整顏色 (黃燈改為黑字比較易讀)
 def color_action(val):
     val_str = str(val)
-    if "賣出" in val_str or "停損" in val_str:
-        return 'color: #ffffff; background-color: #d32f2f; font-weight: bold; padding: 5px; border-radius: 5px;'
-    elif "停利" in val_str:
-        return 'color: #ffffff; background-color: #fbc02d; font-weight: bold; padding: 5px; border-radius: 5px;'
-    elif "續抱" in val_str:
-        return 'color: #ffffff; background-color: #1b5e20; font-weight: bold; padding: 5px; border-radius: 5px;'
+    if "🔴" in val_str or "停損" in val_str:
+        return 'color: #ffffff; background-color: #d32f2f; font-weight: bold; padding: 5px; border-radius: 5px;' # 紅底白字
+    elif "🟡" in val_str or "停利" in val_str:
+        return 'color: #000000; background-color: #ffeb3b; font-weight: bold; padding: 5px; border-radius: 5px;' # 黃底黑字
+    elif "🟢" in val_str or "續抱" in val_str:
+        return 'color: #ffffff; background-color: #2e7d32; font-weight: bold; padding: 5px; border-radius: 5px;' # 綠底白字
     return ''
 
 # --- 資料讀取 ---
@@ -116,7 +117,14 @@ def calculate_v32_score(df_group):
     if c_now > open_p.iloc[i] and v_now > vol.iloc[i-1]: v_score += 15
     if v_now > vol_ma20.iloc[i] * 1.5: v_score += 5
     
-    return {'技術分': min(100, t_score), '量能分': min(100, v_score), '攻擊分': (min(100, t_score) * 0.7) + (min(100, v_score) * 0.3), '收盤': c_now}
+    # 修改：這裡新增回傳 '20MA'，供紅綠燈判斷使用
+    return {
+        '技術分': min(100, t_score), 
+        '量能分': min(100, v_score), 
+        '攻擊分': (min(100, t_score) * 0.7) + (min(100, v_score) * 0.3), 
+        '收盤': c_now,
+        '20MA': m20_now 
+    }
 
 @st.cache_data(ttl=1800)
 def process_data():
@@ -257,7 +265,11 @@ def main():
 
     with tab_inv:
         st.subheader("📝 庫存交易管理")
+        # 建立快速查詢字典
         name_map = dict(zip(v32_df['代號'], v32_df['名稱'])) if not v32_df.empty else {}
+        score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
+        ma20_map = v32_df.set_index('代號')['20MA'].to_dict() if not v32_df.empty else {}
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("##### 📥 **買入**")
@@ -293,7 +305,6 @@ def main():
         if not st.session_state['inventory'].empty:
             inv_df = st.session_state['inventory'].copy()
             inv_rt = get_realtime_quotes(inv_df['股票代號'].tolist())
-            score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
             
             res = []
             for _, r in inv_df.iterrows():
@@ -302,26 +313,30 @@ def main():
                 buy_price = r['買入均價']
                 qty = r['持有股數']
                 
-                # --- 核心邏輯：從買入後起算的高點 ---
-                hist_highs = raw_df[raw_df['Code'] == code]['HighestPrice'].tolist()
-                # 只抓取股價大於買入價之後的高點，模擬「買入後波段高點」
-                wave_high = max([h for h in hist_highs if h >= buy_price] + [curr])
-                
                 pl = (curr - buy_price) * qty
                 roi = (pl / (buy_price * qty) * 100) if buy_price > 0 else 0
-                sc = score_map.get(code, 0)
                 
-                # 建議操作判斷
-                if curr > buy_price and curr < (wave_high * 0.9):
-                    action = "💰 停利 (回落10%)"
-                elif roi < -10: action = "🛑 停損"
-                elif sc >= 60: action = "🟢 續抱"
-                else: action = "🔻 賣出"
+                # 從字典中獲取 攻擊分 與 20MA
+                sc = score_map.get(code, 0)
+                ma20 = ma20_map.get(code, 0)
+                
+                # --- 修改後的紅綠燈判斷邏輯 ---
+                # 優先檢查是否破線
+                if curr < ma20:
+                    # 🔴 紅燈：地板塌了 (趨勢轉空)
+                    action = f"🔴 停損/清倉 (破月線 {ma20:.1f})"
+                elif sc >= 60:
+                    # 🟢 綠燈：趨勢多頭 + 引擎運轉 (動能強)
+                    action = "🟢 續抱 (動能強)"
+                else:
+                    # 🟡 黃燈：趨勢還在 但 引擎熄火 (動能弱)
+                    action = "🟡 停利/減碼 (動能熄火)"
 
                 res.append({
                     '代號': code, '名稱': name_map.get(code, code), 
                     '持有張數': int(qty // 1000), 
-                    '買入均價': buy_price, '即時價': curr, '損益': pl, '報酬率%': roi, 
+                    '買入均價': buy_price, '即時價': curr, '20MA': ma20, # 顯示 20MA 讓自己心裡有底
+                    '損益': pl, '報酬率%': roi, 
                     '攻擊分': sc, '建議操作': action
                 })
             
@@ -332,8 +347,8 @@ def main():
             c3.metric("總市值", f"${(df_res['即時價']*(inv_df['持有股數'])).sum():,.0f}")
             
             st.dataframe(
-                df_res[['代號', '名稱', '持有張數', '買入均價', '即時價', '損益', '報酬率%', '攻擊分', '建議操作']].style
-                .format({'買入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.1f}'})
+                df_res[['代號', '名稱', '持有張數', '買入均價', '即時價', '20MA', '攻擊分', '報酬率%', '損益', '建議操作']].style
+                .format({'買入均價':'{:.2f}', '即時價':'{:.2f}', '20MA':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.1f}'})
                 .map(color_surplus, subset=['損益','報酬率%'])
                 .map(color_action, subset=['建議操作']), 
                 use_container_width=True, hide_index=True
