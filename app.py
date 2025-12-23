@@ -231,7 +231,7 @@ def calculate_risk_factors(code):
     try:
         # 1. Yahoo Finance (R1, R2, R3)
         stock = yf.Ticker(f"{code}.TW")
-        # 嘗試取得季度財報 (比較即時)
+        # 嘗試取得季度財報
         fin = stock.quarterly_financials
         bs = stock.quarterly_balance_sheet
         cf = stock.quarterly_cashflow
@@ -241,20 +241,19 @@ def calculate_risk_factors(code):
         if bs.empty: bs = stock.balance_sheet
         if cf.empty: cf = stock.cashflow
         
-        # R1: 現金流品質 (含金量) = (NI - OCF) / NI
+        # R1: 現金流品質
         if not fin.empty and not cf.empty:
             try:
                 ni = fin.loc['Net Income'].iloc[0]
-                # 尋找 OCF 欄位
                 ocf_key = next((k for k in cf.index if 'Operating' in k), None)
-                ocf = cf.loc[ocf_key].iloc[0] if ocf_key else ni # 若找不到當作相等
+                ocf = cf.loc[ocf_key].iloc[0] if ocf_key else ni 
                 
                 if ocf < ni:
                     ratio = (ni - ocf) / abs(ni) if ni != 0 else 0
-                    r1 = min(30, ratio * 30) # 上限 30 分
+                    r1 = min(30, ratio * 30) 
             except: pass
 
-        # R2: 資產膨脹 (剪刀差) = max(存貨YoY, 應收YoY) - 營收YoY
+        # R2: 資產膨脹
         if not fin.empty and not bs.empty and len(fin.columns) > 1:
             try:
                 rev_now = fin.loc['Total Revenue'].iloc[0]
@@ -277,13 +276,12 @@ def calculate_risk_factors(code):
                 
                 gap = max(inv_yoy, rec_yoy) - rev_yoy
                 if gap > 0:
-                    r2 = min(20, gap * 50) # 上限 20 分
+                    r2 = min(20, gap * 50)
             except: pass
         
-        # R3: 償債壓力 (速動比) Mapping
+        # R3: 償債壓力
         if not bs.empty:
             try:
-                # 簡化計算：(現金 + 應收) / 流動負債
                 cash_key = next((k for k in bs.index if 'Cash' in k), None)
                 rec_key = next((k for k in bs.index if 'Receivables' in k), None)
                 liab_key = next((k for k in bs.index if 'Current Liabilities' in k), None)
@@ -296,10 +294,10 @@ def calculate_risk_factors(code):
                 
                 if qr <= 0.5: r3 = 20
                 elif qr >= 1.5: r3 = 0
-                else: r3 = 20 * (1.5 - qr) # 線性映射
+                else: r3 = 20 * (1.5 - qr)
             except: pass
 
-        # R4: 籌碼壓力 (質押比) - 爬蟲 HiStock
+        # R4: 籌碼壓力 (質押比)
         try:
             url = f"https://histock.tw/stock/large.aspx?no={code}"
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -313,11 +311,10 @@ def calculate_risk_factors(code):
                     pledge_ratio = float(val)
                     break
             
-            r4 = min(30, pledge_ratio * 0.4) # 上限 30 分
+            r4 = min(30, pledge_ratio * 0.4)
         except: pass
 
         total = r1 + r2 + r3 + r4
-        # 回傳詳細字串方便顯示
         detail_str = f"現:{int(r1)} 膨:{int(r2)} 償:{int(r3)} 質:{int(r4)}"
         return total, detail_str
         
@@ -334,7 +331,7 @@ def get_risk_analysis_batch(code_list):
         score, detail = calculate_risk_factors(code)
         risk_data[code] = {'地雷分': score, '風險細節': detail}
         progress_bar.progress((idx + 1) / total)
-        time.sleep(0.5) # 避免對 Yahoo/HiStock 請求太快
+        time.sleep(0.5)
         
     progress_bar.empty()
     return pd.DataFrame.from_dict(risk_data, orient='index').reset_index().rename(columns={'index': '代號'})
@@ -401,18 +398,24 @@ def display_v32_tables(df, price_limit, suffix):
     # --- 功能按鈕區 ---
     c_scan, c_risk, c_update, c_info = st.columns([1, 1, 1, 1.5])
     
+    # 定義 Session State Key，確保不同頁面的資料不打架
+    chip_key = f"chip_data_{suffix}"
+    risk_key = f"risk_data_{suffix}"
+
+    # 按鈕 1: 籌碼掃描
     with c_scan:
         if st.button(f"🚀 籌碼掃描", key=f"scan_{suffix}"):
             chip_df = get_chip_analysis(target_codes)
-            filtered = pd.merge(filtered, chip_df, on='代號', how='left')
+            st.session_state[chip_key] = chip_df # 存入 Session
 
-    # 新增：地雷檢測按鈕
+    # 按鈕 2: 地雷檢測
     with c_risk:
         if st.button(f"💣 地雷檢測", key=f"risk_{suffix}"):
             with st.spinner("正在進行深度財報與質押掃描..."):
                 risk_df = get_risk_analysis_batch(target_codes)
-                filtered = pd.merge(filtered, risk_df, on='代號', how='left')
+                st.session_state[risk_key] = risk_df # 存入 Session
 
+    # 按鈕 3: 更新即時價
     with c_update:
         now = time.time()
         time_diff = now - st.session_state.get('last_update_time', 0)
@@ -425,12 +428,10 @@ def display_v32_tables(df, price_limit, suffix):
         if st.button(btn_label, disabled=btn_disabled, key=f"update_{suffix}", type="primary"):
             with st.spinner(f"🚀 同步 Top {len(target_codes)} 檔股價..."):
                 fresh_quotes = get_realtime_quotes_robust(target_codes)
-                
                 current_quotes = st.session_state.get('realtime_quotes', {})
                 current_quotes.update(fresh_quotes)
                 st.session_state['realtime_quotes'] = current_quotes
                 st.session_state['last_update_time'] = time.time()
-                
                 st.toast(f"✅ 更新成功！", icon="🔄")
                 time.sleep(1)
                 st.rerun()
@@ -440,13 +441,24 @@ def display_v32_tables(df, price_limit, suffix):
             tw_time = get_taiwan_time_str(st.session_state['last_update_time'])
             st.caption(f"🕒 更新: {tw_time}")
 
-    # --- 資料合併 ---
+    # --- 資料合併邏輯 (從 Session 讀取並合併，確保資料共存) ---
+    
+    # 1. 合併籌碼資料 (如果有的話)
+    if chip_key in st.session_state:
+        filtered = pd.merge(filtered, st.session_state[chip_key], on='代號', how='left')
+
+    # 2. 合併地雷資料 (如果有的話)
+    if risk_key in st.session_state:
+        filtered = pd.merge(filtered, st.session_state[risk_key], on='代號', how='left')
+
+    # 3. 合併即時報價
     saved_quotes = st.session_state.get('realtime_quotes', {})
     filtered['即時價'] = filtered['代號'].map(lambda x: saved_quotes.get(x, {}).get('即時價', np.nan))
     filtered['即時價'] = filtered['即時價'].fillna(filtered['收盤'])
 
+    # --- 表格顯示 ---
     base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
-    # 動態顯示新欄位
+    # 動態欄位檢查
     if '主力動向' in filtered.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
     if '地雷分' in filtered.columns: base_cols += ['地雷分', '風險細節']
 
@@ -460,7 +472,6 @@ def display_v32_tables(df, price_limit, suffix):
         st.subheader(title)
         sub = filtered[(filtered['攻擊分'] >= score_range[0]) & (filtered['攻擊分'] <= score_range[1])].head(10)
         if not sub.empty:
-            # 應用多重顏色樣式
             st.dataframe(sub[base_cols].style.format(fmt)
                          .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=86, vmax=92)
                          .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=60, vmax=100)
