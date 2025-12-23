@@ -336,130 +336,90 @@ def get_risk_analysis_batch(code_list):
     progress_bar.empty()
     return pd.DataFrame.from_dict(risk_data, orient='index').reset_index().rename(columns={'index': '代號'})
 
-# --- 籌碼分析 (光速批次版 - 防擋強化版) ---
+# --- 籌碼分析 (HiStock 嗨投資版) ---
 def get_chip_analysis(symbol_list):
-    # 1. 設定目標日期
-    now = datetime.now(pytz.timezone('Asia/Taipei'))
-    target_date = now
+    chip_data = []
+    p_bar = st.progress(0, text="連線至 HiStock 資料庫...")
     
-    # 下午 3 點前資料未出，抓昨天
-    if now.hour < 15:
-        target_date = now - timedelta(days=1)
-    
-    # 建立進度條
-    p_bar = st.progress(0, text="正在連線證交所資料庫...")
-    
-    # 偽裝成 Chrome 瀏覽器的 Header (關鍵！沒有這個會被擋)
+    # 偽裝 Header
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Referer': 'https://www.twse.com.tw/zh/page/trading/fund/T86.html',
-        'X-Requested-With': 'XMLHttpRequest'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
 
-    df_bulk = pd.DataFrame()
-    
-    # 2. 嘗試抓取 (最多回推 3 天)
-    for days_back in range(3):
-        query_date = (target_date - timedelta(days=days_back)).strftime('%Y%m%d')
-        # T86 是三大法人買賣超日報
-        url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={query_date}&selectType=ALL&response=json"
+    total = len(symbol_list)
+    for i, symbol in enumerate(symbol_list):
+        p_bar.progress((i + 1) / total, text=f"分析中: {symbol}")
         
         try:
-            time.sleep(1) # 稍微禮貌一點
-            # 加上 headers 參數
-            r = requests.get(url, headers=headers, timeout=10) 
+            # HiStock 的籌碼頁面網址
+            url = f"https://histock.tw/stock/chips.aspx?no={symbol}"
             
-            # 檢查 HTTP 狀態碼
-            if r.status_code != 200:
-                print(f"HTTP Error {r.status_code} on {query_date}")
-                continue
-
-            data = r.json()
+            # 使用 requests 抓取
+            r = requests.get(url, headers=headers, timeout=8)
             
-            if data['stat'] == 'OK':
-                cols = data['fields']
-                raw_data = data['data']
-                df_bulk = pd.DataFrame(raw_data, columns=cols)
-                break # 成功就跳出
-            else:
-                print(f"{query_date} 無資料: {data['stat']}")
-                pass 
+            # pandas read_html 強大之處：直接把網頁表格轉成 DataFrame
+            # HiStock 的表格通常有 class='tb-stock'
+            dfs = pd.read_html(io.StringIO(r.text))
+            
+            # 找到正確的表格 (通常是第一個或含有'日期'的)
+            target_df = None
+            for df in dfs:
+                if '日期' in df.columns and '外資' in df.columns:
+                    target_df = df
+                    break
+            
+            if target_df is not None and not target_df.empty:
+                # 取最新一筆資料 (第一列或最後一列，視網站排序而定，HiStock 通常最新在上面)
+                # 我們檢查日期的排序，確保取到最新的
+                latest = target_df.iloc[0] # HiStock 第一行通常是最新日期
                 
+                # 處理數據 (去除逗號，轉數字)
+                def clean_num(val):
+                    try:
+                        return int(str(val).replace(',', '').replace('+', ''))
+                    except:
+                        return 0
+                
+                # HiStock 單位已經是「張」了，不需要除以 1000 (需觀察實際數據，有時是張，有時是股，通常表格標題會寫)
+                # 經查 HiStock 顯示的是「張數」
+                f_buy = clean_num(latest['外資'])
+                t_buy = clean_num(latest['投信'])
+                
+                # 3. 判斷動向 (邏輯維持原本)
+                status_str = ""
+                if t_buy > 0: status_str += "🔴 投信買 "
+                elif t_buy < 0: status_str += "🟢 投信賣 "
+                
+                if f_buy > 1000: status_str += "🔥 外資大買 "
+                elif f_buy < -1000: status_str += "🧊 外資倒貨 "
+                
+                if t_buy > 0 and f_buy > 0: tag = "🚀 土洋合買"
+                elif t_buy > 0 and f_buy < 0: tag = "⚔️ 土洋對作(信)"
+                elif t_buy < 0 and f_buy > 0: tag = "⚔️ 土洋對作(外)"
+                elif t_buy < 0 and f_buy < 0: tag = "☠️ 主力棄守"
+                else: tag = "🟡 一般輪動"
+                
+                final_status = f"{tag} | {status_str}" if status_str else tag
+                
+                chip_data.append({
+                    '代號': symbol, 
+                    '投信(張)': t_buy, 
+                    '外資(張)': f_buy, 
+                    '主力動向': final_status
+                })
+            else:
+                chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '🟡 無數據'})
+
         except Exception as e:
-            print(f"Fetch TWSE Error on {query_date}: {e}")
-            pass
+            print(f"HiStock Error {symbol}: {e}")
+            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ Error'})
+        
+        # 禮貌性延遲
+        time.sleep(1.0)
 
-    p_bar.progress(50, text="正在分析主力動向...")
-
-    # 3. 如果還是失敗 (例如連假過長)，回傳空值
-    if df_bulk.empty:
-        p_bar.empty()
-        # 這裡會顯示具體為什麼失敗，方便除錯
-        return pd.DataFrame([
-            {'代號': s, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ 無資料(證交所拒絕)'} 
-            for s in symbol_list
-        ])
-
-    # 4. 資料整理
-    chip_data = []
-    
-    col_stock_id = next((c for c in df_bulk.columns if '證券代號' in c), None)
-    col_trust = next((c for c in df_bulk.columns if '投信' in c and '買賣超股數' in c), None)
-    col_foreign = next((c for c in df_bulk.columns if '外陸資' in c and '買賣超股數' in c), None)
-
-    if not (col_stock_id and col_trust and col_foreign):
-        p_bar.empty()
-        return pd.DataFrame([{'代號': s, '主力動向': '❌ 格式錯誤'} for s in symbol_list])
-
-    def parse_val(val):
-        try:
-            return int(str(val).replace(',', '')) // 1000 
-        except:
-            return 0
-
-    lookup = {}
-    for _, row in df_bulk.iterrows():
-        sid = str(row[col_stock_id]).strip()
-        lookup[sid] = {
-            'trust': parse_val(row[col_trust]),
-            'foreign': parse_val(row[col_foreign])
-        }
-
-    for symbol in symbol_list:
-        symbol = str(symbol).strip()
-        if symbol in lookup:
-            t_buy = lookup[symbol]['trust']
-            f_buy = lookup[symbol]['foreign']
-            
-            status_str = ""
-            if t_buy > 0: status_str += "🔴 投信買 "
-            elif t_buy < 0: status_str += "🟢 投信賣 "
-            
-            if f_buy > 1000: status_str += "🔥 外資大買 "
-            elif f_buy < -1000: status_str += "🧊 外資倒貨 "
-            
-            if t_buy > 0 and f_buy > 0: tag = "🚀 土洋合買"
-            elif t_buy > 0 and f_buy < 0: tag = "⚔️ 土洋對作(信)"
-            elif t_buy < 0 and f_buy > 0: tag = "⚔️ 土洋對作(外)"
-            elif t_buy < 0 and f_buy < 0: tag = "☠️ 主力棄守"
-            else: tag = "🟡 一般輪動"
-            
-            final_status = f"{tag} | {status_str}" if status_str else tag
-            
-            chip_data.append({
-                '代號': symbol, 
-                '投信(張)': t_buy, 
-                '外資(張)': f_buy, 
-                '主力動向': final_status
-            })
-        else:
-            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '🟡 無交易/無數據'})
-
-    p_bar.progress(100, text="完成！")
+    p_bar.progress(100, text="分析完成")
     time.sleep(0.5)
     p_bar.empty()
-    
     return pd.DataFrame(chip_data)
 # --- 庫存管理 ---
 def load_holdings():
