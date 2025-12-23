@@ -336,88 +336,128 @@ def get_risk_analysis_batch(code_list):
     progress_bar.empty()
     return pd.DataFrame.from_dict(risk_data, orient='index').reset_index().rename(columns={'index': '代號'})
 
-# --- 籌碼分析 (修正版) ---
+# --- 籌碼分析 (光速批次版) ---
 def get_chip_analysis(symbol_list):
-    chip_data = []
-    dl = DataLoader()
-    p_bar = st.progress(0)
-    total_steps = len(symbol_list)
+    # 1. 設定目標日期 (如果現在是下午 3 點前，資料可能還沒出來，就抓昨天)
+    now = datetime.now(pytz.timezone('Asia/Taipei'))
+    target_date = now
     
-    for i, symbol in enumerate(symbol_list):
-        p_bar.progress((i + 1) / total_steps)
+    # 如果是下午 3 點前，通常證交所還沒更新，直接用昨天
+    if now.hour < 15:
+        target_date = now - timedelta(days=1)
+    
+    date_str = target_date.strftime('%Y%m%d')
+    
+    # 2. 嘗試抓取全市場資料 (重試機制: 如果今天沒資料，就往回找一天，最多找三天)
+    df_bulk = pd.DataFrame()
+    
+    # 建立進度條給使用者看
+    p_bar = st.progress(0, text="正在連線證交所資料庫...")
+    
+    for days_back in range(3):
+        query_date = (target_date - timedelta(days=days_back)).strftime('%Y%m%d')
+        url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={query_date}&selectType=ALL&response=json"
         
-        # 嘗試最多 2 次 (Retry 機制)
-        success = False
-        error_msg = ""
+        try:
+            # 這是抓取全市場所有股票，只發送一次 Request，速度極快
+            r = requests.get(url, timeout=5)
+            data = r.json()
+            
+            if data['stat'] == 'OK':
+                # 欄位對應 (證交所 JSON 欄位可能會變，這裡用位置抓取比較保險)
+                # 通常：代號(0), 名稱(1), 外資買賣超(19), 投信買賣超(15) <- 需視實際回傳調整，以下用欄位名過濾
+                cols = data['fields']
+                raw_data = data['data']
+                df_bulk = pd.DataFrame(raw_data, columns=cols)
+                
+                # 成功抓到數據，跳出迴圈
+                # st.toast(f"已取得 {query_date} 籌碼資料", icon="✅")
+                break 
+            else:
+                pass # 該日無資料 (可能是假日)，繼續迴圈找前一天
+                
+        except Exception as e:
+            print(f"Fetch TWSE Error: {e}")
+            pass
         
-        for attempt in range(2):
-            try:
-                # 抓取過去 10 天資料
-                start_date = (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d')
-                df = dl.taiwan_stock_institutional_investors(stock_id=symbol, start_date=start_date)
-                
-                if df.empty:
-                    chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '🟡 無數據'})
-                    success = True
-                    break
-                
-                # 取得最新一天的資料
-                latest_date = df['date'].max()
-                latest = df[df['date'] == latest_date]
-                
-                # 計算買賣超 (FinMind 的 name 有時候會變，這裡加強容錯)
-                f_buy = 0
-                t_buy = 0
-                
-                # 外資 (Foreign)
-                foreign_mask = latest['name'].str.contains('Foreign', case=False, na=False)
-                if foreign_mask.any():
-                    f_row = latest[foreign_mask]
-                    f_buy = int((f_row['buy'].sum() - f_row['sell'].sum()) // 1000)
-                
-                # 投信 (Investment Trust)
-                trust_mask = latest['name'].str.contains('Investment_Trust', case=False, na=False)
-                if trust_mask.any():
-                    t_row = latest[trust_mask]
-                    t_buy = int((t_row['buy'].sum() - t_row['sell'].sum()) // 1000)
-                
-                # 判斷動向標籤
-                status_str = ""
-                if t_buy > 0: status_str += "🔴 投信買 "
-                elif t_buy < 0: status_str += "🟢 投信賣 "
-                
-                if f_buy > 1000: status_str += "🔥 外資大買 "
-                elif f_buy < -1000: status_str += "🧊 外資倒貨 "
-                
-                if t_buy > 0 and f_buy > 0: tag = "🚀 土洋合買"
-                elif t_buy > 0 and f_buy < 0: tag = "⚔️ 土洋對作(信)"
-                elif t_buy < 0 and f_buy > 0: tag = "⚔️ 土洋對作(外)"
-                elif t_buy < 0 and f_buy < 0: tag = "☠️ 主力棄守"
-                else: tag = "🟡 一般輪動"
-                
-                final_status = f"{tag} | {status_str}" if status_str else tag
-                
-                chip_data.append({
-                    '代號': symbol, 
-                    '投信(張)': t_buy, 
-                    '外資(張)': f_buy, 
-                    '主力動向': final_status
-                })
-                success = True
-                break # 成功就跳出重試迴圈
+        time.sleep(1) # 避免過度請求
 
-            except Exception as e:
-                error_msg = str(e)
-                time.sleep(1) # 失敗休息一下再試
-        
-        if not success:
-            print(f"❌ 股票 {symbol} 籌碼抓取失敗: {error_msg}") # 在後台印出錯誤
-            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ Error'})
-        
-        # --- 關鍵修正：增加休息時間避免被鎖 IP ---
-        time.sleep(1.5) 
-        
+    p_bar.progress(50, text="正在分析主力動向...")
+
+    # 3. 如果完全抓不到資料 (例如過年連假)，回傳空值
+    if df_bulk.empty:
+        p_bar.empty()
+        return pd.DataFrame([
+            {'代號': s, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ 無資料(連線失敗)'} 
+            for s in symbol_list
+        ])
+
+    # 4. 資料整理與過濾
+    chip_data = []
+    
+    # 找出對應欄位名稱 (證交所欄位名稱很長)
+    col_stock_id = next((c for c in df_bulk.columns if '證券代號' in c), None)
+    col_trust = next((c for c in df_bulk.columns if '投信' in c and '買賣超股數' in c), None)
+    col_foreign = next((c for c in df_bulk.columns if '外陸資' in c and '買賣超股數' in c), None)
+
+    if not (col_stock_id and col_trust and col_foreign):
+        p_bar.empty()
+        return pd.DataFrame([{'代號': s, '主力動向': '❌ 格式錯誤'} for s in symbol_list])
+
+    # 轉成字典加速查詢
+    # 證交所數字會有逗號 (1,000)，需要移除並轉 int
+    def parse_val(val):
+        try:
+            return int(str(val).replace(',', '')) // 1000 # 換算成張數
+        except:
+            return 0
+
+    # 建立快速查詢表 (Lookup Table)
+    lookup = {}
+    for _, row in df_bulk.iterrows():
+        sid = str(row[col_stock_id]).strip()
+        lookup[sid] = {
+            'trust': parse_val(row[col_trust]),
+            'foreign': parse_val(row[col_foreign])
+        }
+
+    # 5. 比對使用者的股票清單
+    for symbol in symbol_list:
+        symbol = str(symbol).strip()
+        if symbol in lookup:
+            t_buy = lookup[symbol]['trust']
+            f_buy = lookup[symbol]['foreign']
+            
+            # 判斷動向標籤 (邏輯同前)
+            status_str = ""
+            if t_buy > 0: status_str += "🔴 投信買 "
+            elif t_buy < 0: status_str += "🟢 投信賣 "
+            
+            if f_buy > 1000: status_str += "🔥 外資大買 "
+            elif f_buy < -1000: status_str += "🧊 外資倒貨 "
+            
+            if t_buy > 0 and f_buy > 0: tag = "🚀 土洋合買"
+            elif t_buy > 0 and f_buy < 0: tag = "⚔️ 土洋對作(信)"
+            elif t_buy < 0 and f_buy > 0: tag = "⚔️ 土洋對作(外)"
+            elif t_buy < 0 and f_buy < 0: tag = "☠️ 主力棄守"
+            else: tag = "🟡 一般輪動"
+            
+            final_status = f"{tag} | {status_str}" if status_str else tag
+            
+            chip_data.append({
+                '代號': symbol, 
+                '投信(張)': t_buy, 
+                '外資(張)': f_buy, 
+                '主力動向': final_status
+            })
+        else:
+            # 該股票不在今日證交所清單 (可能暫停交易或 ETF 類別不同)
+            chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '🟡 無交易/無數據'})
+
+    p_bar.progress(100, text="完成！")
+    time.sleep(0.5)
     p_bar.empty()
+    
     return pd.DataFrame(chip_data)
 # --- 庫存管理 ---
 def load_holdings():
