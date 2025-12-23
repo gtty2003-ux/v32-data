@@ -50,7 +50,6 @@ def color_surplus(val):
     if not isinstance(val, (int, float)): return ''
     return 'color: #d32f2f; font-weight: bold;' if val > 0 else ('color: #388e3c; font-weight: bold;' if val < 0 else 'color: black')
 
-# 修改：針對新的紅綠燈邏輯調整顏色 (黃燈改為黑字比較易讀)
 def color_action(val):
     val_str = str(val)
     if "🔴" in val_str or "停損" in val_str:
@@ -117,7 +116,6 @@ def calculate_v32_score(df_group):
     if c_now > open_p.iloc[i] and v_now > vol.iloc[i-1]: v_score += 15
     if v_now > vol_ma20.iloc[i] * 1.5: v_score += 5
     
-    # 修改：這裡新增回傳 '20MA'，供紅綠燈判斷使用
     return {
         '技術分': min(100, t_score), 
         '量能分': min(100, v_score), 
@@ -138,32 +136,87 @@ def process_data():
             results.append(res)
     return pd.DataFrame(results), raw_df, None
 
-# --- 即時報價 (修正抓取邏輯) ---
-@st.cache_data(ttl=60)
-def get_realtime_quotes(code_list):
+# --- 強化的即時報價模組 (三層備援) ---
+def fetch_price_twse(code):
+    """第一層：嘗試從證交所/櫃買中心抓取 (最準)"""
+    try:
+        stock = twstock.Realtime(code)
+        if stock.realtime['latest_trade_price']:
+            return float(stock.realtime['latest_trade_price'])
+        # 如果還沒開盤或抓不到，嘗試抓開盤價或昨收
+        elif stock.realtime['open']:
+             return float(stock.realtime['open'])
+        return None
+    except:
+        return None
+
+def fetch_price_yahoo(code):
+    """第二層：嘗試從 Yahoo 股市抓取"""
+    try:
+        # 簡單爬蟲或使用其他 library，這裡示範用 requests 抓取 HTML 結構變動大，暫略
+        # 改用 yfinance 的快速模式作為替代 Yahoo 來源 (其實 yfinance 也是爬 yahoo)
+        ticker = yf.Ticker(f"{code}.TW")
+        data = ticker.history(period="1d", interval="1m")
+        if not data.empty:
+            return float(data['Close'].iloc[-1])
+        return None
+    except:
+        return None
+
+def fetch_price_google_yf(code):
+    """第三層：Yfinance (備用)"""
+    try:
+        # 這裡作為最後手段
+        data = yf.download(f"{code}.TW", period="1d", interval="1m", progress=False)
+        if not data.empty:
+             return float(data['Close'].iloc[-1])
+        return None
+    except:
+        return None
+
+# 我們不使用 cache_data，而是使用 st.session_state 手動控制更新頻率
+def get_realtime_quotes_robust(code_list):
     if not code_list: return {}
     clean_codes = [str(c).strip().split('.')[0] for c in code_list]
-    yf_codes = [f"{c}.TW" for c in clean_codes]
     realtime_data = {}
-    try:
-        data = yf.download(yf_codes, period="1d", interval="1m", progress=False, group_by='ticker')
-        for code in clean_codes:
-            ticker_symbol = f"{code}.TW"
-            try:
-                if len(clean_codes) > 1:
-                    price = data[ticker_symbol]['Close'].iloc[-1]
-                else:
-                    price = data['Close'].iloc[-1]
-                if not np.isnan(price):
-                    realtime_data[code] = {'即時價': round(float(price), 2)}
-            except: continue
-    except: pass
+    
+    # 建立進度條，因為單檔抓取比較慢
+    progress_bar = st.progress(0)
+    total = len(clean_codes)
+    
+    for idx, code in enumerate(clean_codes):
+        price = None
+        
+        # 1. 嘗試 TWSE
+        price = fetch_price_twse(code)
+        
+        # 2. 失敗則嘗試 Yahoo (這裡直接用 yf 作為 Yahoo 介面，因為它是最穩定的 Yahoo API wrapper)
+        if price is None:
+            price = fetch_price_yahoo(code)
+            
+        # 3. 還是失敗，嘗試 Google (這裡邏輯上 yfinance 已涵蓋，若有專門 google API 可替換)
+        # 暫時均以 yfinance 作為後兩道防線，但參數不同
+        if price is None:
+             price = fetch_price_google_yf(code)
+
+        if price is not None:
+            realtime_data[code] = {'即時價': round(price, 2)}
+        
+        progress_bar.progress((idx + 1) / total)
+        
+    progress_bar.empty()
     return realtime_data
 
-def merge_realtime_data(df):
+def merge_realtime_data(df, realtime_dict=None):
     if df.empty: return df
-    rt = get_realtime_quotes(df['代號'].tolist())
-    df['即時價'] = df['代號'].map(lambda x: rt.get(x, {}).get('即時價', np.nan))
+    
+    # 如果有傳入外部即時資料字典，就優先使用
+    if realtime_dict:
+        df['即時價'] = df['代號'].map(lambda x: realtime_dict.get(x, {}).get('即時價', np.nan))
+    else:
+        # 否則使用舊有邏輯(但不建議，因為這會觸發舊的 cache)
+        pass 
+        
     df['即時價'] = df['即時價'].fillna(df['收盤'])
     return df
 
@@ -229,8 +282,11 @@ def display_v32_tables(df, price_limit, suffix):
     if st.button(f"🚀 籌碼掃描 (Top {len(target_codes)} 檔)", key=f"scan_{suffix}"):
         chip_df = get_chip_analysis(target_codes)
         filtered = pd.merge(filtered, chip_df, on='代號', how='left')
-
-    filtered = merge_realtime_data(filtered)
+    
+    # 一般列表這裡還是用舊的快速抓取(或不抓即時，只顯示收盤，保持效能)，或可選擇要不要更新
+    # 這裡暫時維持原樣，只用收盤價填充即時價，避免外部列表卡太久
+    filtered['即時價'] = filtered['收盤']
+    
     base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
     if '主力動向' in filtered.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
     fmt = {'即時價':'{:.2f}', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}'}
@@ -252,6 +308,10 @@ def main():
     st.title("⚔️ V32 戰情室 (Dual Core)")
     if 'inventory' not in st.session_state: st.session_state['inventory'] = load_holdings()
     
+    # 初始化即時報價的 session state
+    if 'realtime_quotes' not in st.session_state: st.session_state['realtime_quotes'] = {}
+    if 'last_update_time' not in st.session_state: st.session_state['last_update_time'] = 0
+    
     with st.spinner("讀取核心資料..."):
         v32_df, raw_df, err = process_data()
     
@@ -265,10 +325,42 @@ def main():
 
     with tab_inv:
         st.subheader("📝 庫存交易管理")
+        
+        # --- 刷新按鈕邏輯 ---
+        col_btn, col_info = st.columns([1, 4])
+        with col_btn:
+            now = time.time()
+            time_diff = now - st.session_state['last_update_time']
+            btn_label = "🔄 更新即時股價"
+            btn_disabled = False
+            
+            if time_diff < 60:
+                btn_label = f"⏳ 冷卻中 ({int(60 - time_diff)}s)"
+                btn_disabled = True
+            
+            if st.button(btn_label, disabled=btn_disabled, type="primary"):
+                if not st.session_state['inventory'].empty:
+                    with st.spinner("🚀 正從證交所/Yahoo/Google 同步最新報價..."):
+                        codes = st.session_state['inventory']['股票代號'].tolist()
+                        # 執行強制更新
+                        fresh_quotes = get_realtime_quotes_robust(codes)
+                        st.session_state['realtime_quotes'] = fresh_quotes
+                        st.session_state['last_update_time'] = time.time()
+                        st.rerun() # 重新載入頁面以顯示新數據
+        
+        with col_info:
+            if st.session_state['last_update_time'] > 0:
+                last_time_str = datetime.fromtimestamp(st.session_state['last_update_time']).strftime('%H:%M:%S')
+                st.caption(f"最後更新時間: {last_time_str}")
+
         # 建立快速查詢字典
         name_map = dict(zip(v32_df['代號'], v32_df['名稱'])) if not v32_df.empty else {}
         score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
-        ma20_map = v32_df.set_index('代號')['20MA'].to_dict() if not v32_df.empty else {}
+        # 安全取得 20MA
+        if '20MA' in v32_df.columns:
+            ma20_map = v32_df.set_index('代號')['20MA'].to_dict()
+        else:
+            ma20_map = {code: 0 for code in v32_df['代號']}
 
         c1, c2 = st.columns(2)
         with c1:
@@ -304,12 +396,20 @@ def main():
         st.divider()
         if not st.session_state['inventory'].empty:
             inv_df = st.session_state['inventory'].copy()
-            inv_rt = get_realtime_quotes(inv_df['股票代號'].tolist())
+            
+            # 使用 session state 中的即時報價 (如果有的話)
+            saved_quotes = st.session_state.get('realtime_quotes', {})
             
             res = []
             for _, r in inv_df.iterrows():
                 code = str(r['股票代號'])
-                curr = inv_rt.get(code, {}).get('即時價', r['買入均價'])
+                # 優先使用按鈕更新後的報價，沒有的話用買入價暫代 (或收盤價)
+                curr = saved_quotes.get(code, {}).get('即時價', r['買入均價'])
+                
+                # 如果完全沒有即時價更新過，且買入價也為0 (異常)，嘗試從 v32_df 找收盤價
+                if curr == 0 and not v32_df.empty:
+                     curr = v32_df[v32_df['代號']==code]['收盤'].values[0] if not v32_df[v32_df['代號']==code].empty else 0
+
                 buy_price = r['買入均價']
                 qty = r['持有股數']
                 
@@ -320,22 +420,18 @@ def main():
                 sc = score_map.get(code, 0)
                 ma20 = ma20_map.get(code, 0)
                 
-                # --- 修改後的紅綠燈判斷邏輯 ---
-                # 優先檢查是否破線
+                # --- 紅綠燈判斷邏輯 (邏輯不變，只用於生成 Action 字串) ---
                 if curr < ma20:
-                    # 🔴 紅燈：地板塌了 (趨勢轉空)
                     action = f"🔴 停損/清倉 (破月線 {ma20:.1f})"
                 elif sc >= 60:
-                    # 🟢 綠燈：趨勢多頭 + 引擎運轉 (動能強)
                     action = "🟢 續抱 (動能強)"
                 else:
-                    # 🟡 黃燈：趨勢還在 但 引擎熄火 (動能弱)
                     action = "🟡 停利/減碼 (動能熄火)"
 
                 res.append({
                     '代號': code, '名稱': name_map.get(code, code), 
                     '持有張數': int(qty // 1000), 
-                    '買入均價': buy_price, '即時價': curr, '20MA': ma20, # 顯示 20MA 讓自己心裡有底
+                    '買入均價': buy_price, '即時價': curr, 
                     '損益': pl, '報酬率%': roi, 
                     '攻擊分': sc, '建議操作': action
                 })
@@ -346,9 +442,10 @@ def main():
             c2.metric("總損益", f"${df_res['損益'].sum():,.0f}", delta=f"{df_res['損益'].sum():,.0f}")
             c3.metric("總市值", f"${(df_res['即時價']*(inv_df['持有股數'])).sum():,.0f}")
             
+            # 在這裡顯示時移除 '20MA' 欄位，但邏輯中已經使用過了
             st.dataframe(
-                df_res[['代號', '名稱', '持有張數', '買入均價', '即時價', '20MA', '攻擊分', '報酬率%', '損益', '建議操作']].style
-                .format({'買入均價':'{:.2f}', '即時價':'{:.2f}', '20MA':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.1f}'})
+                df_res[['代號', '名稱', '持有張數', '買入均價', '即時價', '攻擊分', '報酬率%', '損益', '建議操作']].style
+                .format({'買入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.1f}'})
                 .map(color_surplus, subset=['損益','報酬率%'])
                 .map(color_action, subset=['建議操作']), 
                 use_container_width=True, hide_index=True
