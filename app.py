@@ -336,66 +336,74 @@ def get_risk_analysis_batch(code_list):
     progress_bar.empty()
     return pd.DataFrame.from_dict(risk_data, orient='index').reset_index().rename(columns={'index': '代號'})
 
-# --- 籌碼分析 (光速批次版) ---
+# --- 籌碼分析 (光速批次版 - 防擋強化版) ---
 def get_chip_analysis(symbol_list):
-    # 1. 設定目標日期 (如果現在是下午 3 點前，資料可能還沒出來，就抓昨天)
+    # 1. 設定目標日期
     now = datetime.now(pytz.timezone('Asia/Taipei'))
     target_date = now
     
-    # 如果是下午 3 點前，通常證交所還沒更新，直接用昨天
+    # 下午 3 點前資料未出，抓昨天
     if now.hour < 15:
         target_date = now - timedelta(days=1)
     
-    date_str = target_date.strftime('%Y%m%d')
-    
-    # 2. 嘗試抓取全市場資料 (重試機制: 如果今天沒資料，就往回找一天，最多找三天)
-    df_bulk = pd.DataFrame()
-    
-    # 建立進度條給使用者看
+    # 建立進度條
     p_bar = st.progress(0, text="正在連線證交所資料庫...")
     
+    # 偽裝成 Chrome 瀏覽器的 Header (關鍵！沒有這個會被擋)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'Referer': 'https://www.twse.com.tw/zh/page/trading/fund/T86.html',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+
+    df_bulk = pd.DataFrame()
+    
+    # 2. 嘗試抓取 (最多回推 3 天)
     for days_back in range(3):
         query_date = (target_date - timedelta(days=days_back)).strftime('%Y%m%d')
+        # T86 是三大法人買賣超日報
         url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={query_date}&selectType=ALL&response=json"
         
         try:
-            # 這是抓取全市場所有股票，只發送一次 Request，速度極快
-            r = requests.get(url, timeout=5)
+            time.sleep(1) # 稍微禮貌一點
+            # 加上 headers 參數
+            r = requests.get(url, headers=headers, timeout=10) 
+            
+            # 檢查 HTTP 狀態碼
+            if r.status_code != 200:
+                print(f"HTTP Error {r.status_code} on {query_date}")
+                continue
+
             data = r.json()
             
             if data['stat'] == 'OK':
-                # 欄位對應 (證交所 JSON 欄位可能會變，這裡用位置抓取比較保險)
-                # 通常：代號(0), 名稱(1), 外資買賣超(19), 投信買賣超(15) <- 需視實際回傳調整，以下用欄位名過濾
                 cols = data['fields']
                 raw_data = data['data']
                 df_bulk = pd.DataFrame(raw_data, columns=cols)
-                
-                # 成功抓到數據，跳出迴圈
-                # st.toast(f"已取得 {query_date} 籌碼資料", icon="✅")
-                break 
+                break # 成功就跳出
             else:
-                pass # 該日無資料 (可能是假日)，繼續迴圈找前一天
+                print(f"{query_date} 無資料: {data['stat']}")
+                pass 
                 
         except Exception as e:
-            print(f"Fetch TWSE Error: {e}")
+            print(f"Fetch TWSE Error on {query_date}: {e}")
             pass
-        
-        time.sleep(1) # 避免過度請求
 
     p_bar.progress(50, text="正在分析主力動向...")
 
-    # 3. 如果完全抓不到資料 (例如過年連假)，回傳空值
+    # 3. 如果還是失敗 (例如連假過長)，回傳空值
     if df_bulk.empty:
         p_bar.empty()
+        # 這裡會顯示具體為什麼失敗，方便除錯
         return pd.DataFrame([
-            {'代號': s, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ 無資料(連線失敗)'} 
+            {'代號': s, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ 無資料(證交所拒絕)'} 
             for s in symbol_list
         ])
 
-    # 4. 資料整理與過濾
+    # 4. 資料整理
     chip_data = []
     
-    # 找出對應欄位名稱 (證交所欄位名稱很長)
     col_stock_id = next((c for c in df_bulk.columns if '證券代號' in c), None)
     col_trust = next((c for c in df_bulk.columns if '投信' in c and '買賣超股數' in c), None)
     col_foreign = next((c for c in df_bulk.columns if '外陸資' in c and '買賣超股數' in c), None)
@@ -404,15 +412,12 @@ def get_chip_analysis(symbol_list):
         p_bar.empty()
         return pd.DataFrame([{'代號': s, '主力動向': '❌ 格式錯誤'} for s in symbol_list])
 
-    # 轉成字典加速查詢
-    # 證交所數字會有逗號 (1,000)，需要移除並轉 int
     def parse_val(val):
         try:
-            return int(str(val).replace(',', '')) // 1000 # 換算成張數
+            return int(str(val).replace(',', '')) // 1000 
         except:
             return 0
 
-    # 建立快速查詢表 (Lookup Table)
     lookup = {}
     for _, row in df_bulk.iterrows():
         sid = str(row[col_stock_id]).strip()
@@ -421,14 +426,12 @@ def get_chip_analysis(symbol_list):
             'foreign': parse_val(row[col_foreign])
         }
 
-    # 5. 比對使用者的股票清單
     for symbol in symbol_list:
         symbol = str(symbol).strip()
         if symbol in lookup:
             t_buy = lookup[symbol]['trust']
             f_buy = lookup[symbol]['foreign']
             
-            # 判斷動向標籤 (邏輯同前)
             status_str = ""
             if t_buy > 0: status_str += "🔴 投信買 "
             elif t_buy < 0: status_str += "🟢 投信賣 "
@@ -451,7 +454,6 @@ def get_chip_analysis(symbol_list):
                 '主力動向': final_status
             })
         else:
-            # 該股票不在今日證交所清單 (可能暫停交易或 ETF 類別不同)
             chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '🟡 無交易/無數據'})
 
     p_bar.progress(100, text="完成！")
