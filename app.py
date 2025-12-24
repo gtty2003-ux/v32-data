@@ -11,6 +11,8 @@ import twstock
 import matplotlib.colors as mcolors
 import io
 import requests
+# --- 新增：富果 API 套件 ---
+from fugle_marketdata import RestClient
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
@@ -171,55 +173,57 @@ def process_data():
             results.append(res)
     return pd.DataFrame(results), raw_df, None
 
-# --- 強化的即時報價模組 ---
-def fetch_price_twse(code):
-    try:
-        stock = twstock.Realtime(code)
-        if stock.realtime.get('success') and stock.realtime.get('latest_trade_price'):
-            price = float(stock.realtime['latest_trade_price'])
-            if price > 0: return price
-        if stock.realtime.get('open'):
-             return float(stock.realtime['open'])
-        return None
-    except:
-        return None
-
-def fetch_price_yahoo(code):
-    try:
-        ticker = yf.Ticker(f"{code}.TW")
-        info = ticker.info
-        if 'currentPrice' in info: return float(info['currentPrice'])
-        if 'regularMarketPrice' in info: return float(info['regularMarketPrice'])
-        data = ticker.history(period="1d", interval="1m")
-        if not data.empty:
-            return float(data['Close'].iloc[-1])
-        return None
-    except:
-        return None
-
-def fetch_price_google_backup(code):
-    try:
-        data = yf.download(f"{code}.TW", period="1d", interval="1m", progress=False)
-        if not data.empty:
-             return float(data['Close'].iloc[-1])
-        return None
-    except:
-        return None
-
+# --- 強化的即時報價模組 (Fugle API - Secrets 版) ---
 def get_realtime_quotes_robust(code_list):
-    if not code_list: return {}
-    clean_codes = [str(c).strip().split('.')[0] for c in code_list]
     realtime_data = {}
-    progress_bar = st.progress(0)
-    total = len(clean_codes)
-    for idx, code in enumerate(clean_codes):
-        price = None
-        price = fetch_price_twse(code)
-        if price is None: price = fetch_price_yahoo(code)
-        if price is None: price = fetch_price_google_backup(code)
-        if price is not None:
-            realtime_data[code] = {'即時價': round(price, 2)}
+    
+    # 1. 安全地從 Streamlit Secrets 讀取 API Key
+    try:
+        api_key = st.secrets["general"]["FUGLE_API_KEY"]
+    except:
+        st.error("❌ 尚未設定 Fugle API Key！請到 Streamlit 後台 Secrets 設定。")
+        return {}
+
+    # 2. 建立連線
+    try:
+        client = RestClient(api_key=api_key)
+    except Exception as e:
+        st.error(f"Fugle 連線失敗: {e}")
+        return {}
+    
+    # 3. 執行批次抓取
+    progress_bar = st.progress(0, text="🚀 富果引擎啟動中 (Fugle API)...")
+    total = len(code_list)
+    
+    for idx, code in enumerate(code_list):
+        # 去除空白與副檔名 (例如 "2330.TW" -> "2330")
+        clean_code = str(code).strip().split('.')[0]
+        
+        try:
+            stock = client.stock
+            # 使用 Fugle 抓取即時行情
+            q = stock.intraday.quote(symbol=clean_code)
+            
+            # 兼容 Fugle 不同版本的數據結構
+            price = None
+            if 'closePrice' in q:
+                price = q['closePrice']
+            elif 'lastPrice' in q:
+                price = q['lastPrice']
+            elif 'avgPrice' in q:
+                price = q['avgPrice']
+                
+            if price:
+                realtime_data[clean_code] = {'即時價': float(price)}
+            
+        except Exception as e:
+            # 這裡印出錯誤方便除錯，但介面上不顯示以免太亂
+            print(f"Fugle Quote Error {clean_code}: {e}")
+            pass
+            
+        # 更新進度條
         progress_bar.progress((idx + 1) / total)
+    
     progress_bar.empty()
     return realtime_data
 
@@ -421,6 +425,7 @@ def get_chip_analysis(symbol_list):
     time.sleep(0.5)
     p_bar.empty()
     return pd.DataFrame(chip_data)
+
 # --- 庫存管理 ---
 def load_holdings():
     try:
