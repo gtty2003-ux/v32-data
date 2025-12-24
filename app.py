@@ -540,7 +540,70 @@ def display_v32_tables(df, price_limit, suffix):
         else: st.caption("暫無標的")
         st.divider()
 
-# --- 主程式 ---
+# --- 新增：個股搜尋專用顯示函式 ---
+def display_single_stock_search(df, target_code):
+    # 鎖定目標股票
+    row = df[df['代號'] == target_code].copy()
+    if row.empty:
+        st.warning(f"⚠️ 資料庫中找不到代號 {target_code}，或該股未符合 V32 篩選標準（如 KY、DR 股等）。")
+        return
+
+    # 定義搜尋頁專用的 Session Key
+    search_key_chip = f"search_chip_{target_code}"
+    search_key_risk = f"search_risk_{target_code}"
+    search_key_quote = f"search_quote_{target_code}"
+
+    # --- 操作按鈕區 ---
+    col_input, col_btn = st.columns([3, 2])
+    with col_btn:
+        # 單一按鈕觸發全部分析 (優化體驗)
+        if st.button("🔎 立即詳細診斷 (籌碼/地雷/即時)", key=f"btn_search_{target_code}", type="primary"):
+            with st.spinner(f"正在深度分析 {target_code} ..."):
+                # 1. 抓即時價
+                q = get_realtime_quotes_robust([target_code])
+                st.session_state['realtime_quotes'].update(q) # 更新全域報價
+                
+                # 2. 抓籌碼
+                c = get_chip_analysis([target_code])
+                st.session_state[search_key_chip] = c
+                
+                # 3. 抓地雷
+                r = get_risk_analysis_batch([target_code])
+                st.session_state[search_key_risk] = r
+                
+                st.rerun()
+
+    # --- 資料合併 ---
+    # 1. 合併籌碼
+    if search_key_chip in st.session_state:
+        row = pd.merge(row, st.session_state[search_key_chip], on='代號', how='left')
+    
+    # 2. 合併地雷
+    if search_key_risk in st.session_state:
+        row = pd.merge(row, st.session_state[search_key_risk], on='代號', how='left')
+        
+    # 3. 合併即時價 (從全域 Session 抓)
+    saved_quotes = st.session_state.get('realtime_quotes', {})
+    row['即時價'] = saved_quotes.get(target_code, {}).get('即時價', np.nan)
+    row['即時價'] = row['即時價'].fillna(row['收盤'])
+
+    # --- 表格顯示 (完全比照 S 級樣式) ---
+    base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
+    if '主力動向' in row.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
+    if '地雷分' in row.columns: base_cols += ['地雷分', '風險細節']
+
+    fmt = {'即時價':'{:.2f}', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}', '地雷分':'{:.0f}'}
+
+    st.markdown(f"### 🎯 {target_code} 分析結果")
+    st.dataframe(row[base_cols].style.format(fmt)
+                 .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=60, vmax=100) # 搜尋頁不限分，故範圍拉寬
+                 .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=60, vmax=100)
+                 .background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=60, vmax=100)
+                 .map(color_risk, subset=['地雷分'] if '地雷分' in row.columns else [])
+                 .map(color_action, subset=['主力動向'] if '主力動向' in row.columns else []), 
+                 hide_index=True, use_container_width=True)
+
+# --- 主程式 (已修改 Tab 結構) ---
 def main():
     st.title("⚔️ V32 戰情室 (Dual Core)")
     if 'inventory' not in st.session_state: st.session_state['inventory'] = load_holdings()
@@ -551,13 +614,28 @@ def main():
     with st.spinner("讀取核心資料..."):
         v32_df, raw_df, err = process_data()
     
-    tab_80, tab_50, tab_inv = st.tabs(["💰 80元以下推薦", "🪙 50元以下推薦", "💼 庫存管理"])
+    # --- 修改點：新增 tab_search ---
+    tab_80, tab_50, tab_search, tab_inv = st.tabs(["💰 80元以下推薦", "🪙 50元以下推薦", "🔍 個股診斷", "💼 庫存管理"])
 
     with tab_80:
         if not v32_df.empty: display_v32_tables(v32_df.copy(), 80, "80")
 
     with tab_50:
         if not v32_df.empty: display_v32_tables(v32_df.copy(), 50, "50")
+
+    # --- 修改點：新增搜尋頁面邏輯 ---
+    with tab_search:
+        st.subheader("🔍 個股 V32 體檢室")
+        c1, c2 = st.columns([1, 3])
+        with c1:
+            search_input = st.text_input("輸入股票代號", placeholder="例如: 2330", max_chars=4)
+        
+        if search_input:
+            clean_code = search_input.strip()
+            if not v32_df.empty:
+                display_single_stock_search(v32_df.copy(), clean_code)
+            else:
+                st.error("資料尚未載入")
 
     with tab_inv:
         st.subheader("📝 庫存交易管理")
@@ -642,9 +720,9 @@ def main():
                 curr = saved_quotes.get(code, {}).get('即時價', r['買入均價'])
                 
                 if (curr == 0 or curr == r['買入均價']) and not v32_df.empty:
-                     backup_price = v32_df[v32_df['代號']==code]['收盤'].values
-                     if len(backup_price) > 0:
-                         curr = backup_price[0]
+                      backup_price = v32_df[v32_df['代號']==code]['收盤'].values
+                      if len(backup_price) > 0:
+                          curr = backup_price[0]
 
                 buy_price = r['買入均價']
                 qty = r['持有股數']
@@ -655,12 +733,13 @@ def main():
                 sc = score_map.get(code, 0)
                 ma20 = ma20_map.get(code, 0)
                 
+                # --- 此處已修正為 75 分 ---
                 if curr < ma20:
                     action = f"🔴 停損/清倉 (破月線 {ma20:.1f})"
                 elif sc >= 75:
-                    action = "🟢 續抱 (動能強)"
+                    action = f"🟢 續抱 (攻擊分 {sc:.0f})"
                 else:
-                    action = "🟡 停利/減碼 (動能熄火)"
+                    action = f"🟡 停利/減碼 (攻擊分 {sc:.0f} < 75)"
 
                 res.append({
                     '代號': code, '名稱': name_map.get(code, code), 
