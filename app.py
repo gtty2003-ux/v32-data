@@ -82,6 +82,54 @@ def color_risk(val):
         return 'color: #000000; background-color: #ffeb3b; font-weight: bold;' # 黃底 (警戒)
     return 'color: #1b5e20; font-weight: bold;' # 綠字 (安全)
 
+# ... (上面是 color_risk 函式)
+    return 'color: #1b5e20; font-weight: bold;' # 綠字 (安全)
+
+# ================= ✄ 這裡開始插入 =================
+
+# --- 新增：大盤濾網模組 ---
+@st.cache_data(ttl=3600) # 大盤一小時更新一次即可
+def get_market_status():
+    try:
+        # 抓取台股大盤 (加權指數)
+        twii = yf.Ticker("^TWII")
+        hist = twii.history(period="6mo") # 抓半年數據
+        
+        if hist.empty: return None
+
+        close = hist['Close']
+        current_price = close.iloc[-1]
+        
+        # 計算均線
+        ma20 = close.rolling(20).mean().iloc[-1] # 月線
+        ma60 = close.rolling(60).mean().iloc[-1] # 季線 (生命線)
+        
+        # 判斷狀態
+        status = "盤整/不明"
+        signal = "🟡"
+        
+        # 邏輯判斷
+        if current_price > ma60:
+            if current_price > ma20:
+                status = "多頭進攻 (安全)"
+                signal = "🟢" 
+            else:
+                status = "多頭回檔 (警戒)"
+                signal = "🟡"
+        else:
+            status = "空頭走勢 (危險 - 禁止買進)"
+            signal = "🔴"
+            
+        return {
+            'status': status,
+            'signal': signal,
+            'price': current_price,
+            'ma60': ma60,
+            'gap': (current_price - ma60) / ma60 * 100
+        }
+    except Exception as e:
+        return None
+
 # --- 資料讀取 ---
 @st.cache_data(ttl=1800)
 def load_data_from_github():
