@@ -654,6 +654,21 @@ def display_single_stock_search(df, target_code):
 # --- 主程式 (已修改 Tab 結構) ---
 def main():
     st.title("⚔️ V32 戰情室 (Dual Core)")
+    # --- 插入：大盤濾網顯示 ---
+    market = get_market_status()
+    if market:
+        c1, c2, c3 = st.columns([2, 1, 1])
+        with c1:
+            if "危險" in market['status']:
+                 st.error(f"{market['signal']} **大盤濾網：{market['status']}**")
+            else:
+                 st.info(f"{market['signal']} **大盤濾網：{market['status']}**")
+        with c2:
+            st.metric("加權指數", f"{market['price']:,.0f}", f"{market['gap']:.2f}% (距季線)")
+        with c3:
+            st.metric("季線 (60MA)", f"{market['ma60']:,.0f}")
+            
+        st.divider() # 畫一條線區隔
     if 'inventory' not in st.session_state: st.session_state['inventory'] = load_holdings()
     
     if 'realtime_quotes' not in st.session_state: st.session_state['realtime_quotes'] = {}
