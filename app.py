@@ -11,12 +11,11 @@ import twstock
 import matplotlib.colors as mcolors
 import io
 import requests
-# --- 新增：富果 API 套件 ---
 from fugle_marketdata import RestClient
 
 # --- 設定頁面資訊 ---
 st.set_page_config(
-    page_title="V32 戰情室 (Dual Core)",
+    page_title="V32 戰情室 (Sniper Mode)",
     layout="wide",
     page_icon="⚔️"
 )
@@ -82,11 +81,6 @@ def color_risk(val):
         return 'color: #000000; background-color: #ffeb3b; font-weight: bold;' # 黃底 (警戒)
     return 'color: #1b5e20; font-weight: bold;' # 綠字 (安全)
 
-# ... (上面是 color_risk 函式)
-    return 'color: #1b5e20; font-weight: bold;' # 綠字 (安全)
-
-# ================= ✄ 這裡開始插入 =================
-
 # --- 新增：大盤濾網模組 ---
 @st.cache_data(ttl=3600) # 大盤一小時更新一次即可
 def get_market_status():
@@ -150,48 +144,137 @@ def load_data_from_github():
     except Exception as e:
         return pd.DataFrame()
 
-# --- V32 運算邏輯 ---
+# --- V32 運算邏輯 (Option A: 標準狙擊手 - ADX/乖離率濾網 + 0分起跑計分) ---
 def calculate_v32_score(df_group):
-    if len(df_group) < 60: return None 
+    # 資料長度不足無法計算 ADX (至少需要 14+1 天)
+    if len(df_group) < 30: return None 
     df = df_group.sort_values('Date').reset_index(drop=True)
-    close, vol, high, open_p = df['ClosingPrice'], df['TradeVolume'], df['HighestPrice'], df['OpeningPrice']
     
+    # 基礎數據
+    close = df['ClosingPrice']
+    high = df['HighestPrice']
+    low = df['LowestPrice']
+    vol = df['TradeVolume']
+    open_p = df['OpeningPrice']
+    
+    # ==========================================
+    # 🔍 步驟 1: 計算關鍵指標 (ADX & 乖離率)
+    # ==========================================
+    
+    # 1. 計算均線
     ma5, ma20, ma60 = close.rolling(5).mean(), close.rolling(20).mean(), close.rolling(60).mean()
+    
+    # 2. 計算 ADX (趨勢強度指標) - 使用 Pandas 實作
+    # True Range
+    df['tr0'] = abs(high - low)
+    df['tr1'] = abs(high - close.shift(1))
+    df['tr2'] = abs(low - close.shift(1))
+    tr = df[['tr0', 'tr1', 'tr2']].max(axis=1)
+    
+    # Directional Movement
+    up_move = high - high.shift(1)
+    down_move = low.shift(1) - low
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Wilder's Smoothing (alpha=1/14)
+    atr = tr.ewm(alpha=1/14, adjust=False).mean()
+    smooth_plus_dm = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean()
+    smooth_minus_dm = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean()
+    
+    plus_di = 100 * (smooth_plus_dm / atr)
+    minus_di = 100 * (smooth_minus_dm / atr)
+    
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.ewm(alpha=1/14, adjust=False).mean() # ADX 
+    
+    # 3. 準備當前數值
+    i = -1 
+    c_now = close.iloc[i]
+    m20_now = ma20.iloc[i]
+    v_now = vol.iloc[i]
+    adx_now = adx.iloc[i]
+    
+    # 防呆
+    if pd.isna(c_now) or c_now == 0 or pd.isna(m20_now) or m20_now == 0 or pd.isna(adx_now): 
+        return None
+
+    # ==========================================
+    # ⛔ 步驟 2: 雙重濾網 (The Gatekeepers)
+    # ==========================================
+    
+    # 濾網 A: 防止被巴 (The Anti-Whipsaw)
+    # 邏輯：ADX <= 25 代表趨勢不明顯，直接淘汰
+    if adx_now <= 25: 
+        return None 
+        
+    # 濾網 B: 防止追高 (The Anti-Chase)
+    # 邏輯：乖離率 >= 15% 代表離月線太遠，風險太高不追
+    bias_percentage = (c_now - m20_now) / m20_now * 100
+    if bias_percentage >= 15:
+        return None 
+
+    # --- 能走到這裡，代表 ADX > 25 且 乖離率 < 15% (合格標的) ---
+    # --- 接下來使用「激進派計分 (0分起跑)」進行評比 ---
+
+    # 其他指標計算 (RSI, MACD...)
     delta = close.diff()
     gain, loss = (delta.where(delta > 0, 0)).rolling(14).mean(), (-delta.where(delta < 0, 0)).rolling(14).mean()
     rsi = 100 - (100 / (1 + (gain / loss)))
-    
+    r_now = rsi.iloc[i]
+
     exp1, exp2 = close.ewm(span=12, adjust=False).mean(), close.ewm(span=26, adjust=False).mean()
     macd, signal = (exp1 - exp2), (exp1 - exp2).ewm(span=9, adjust=False).mean()
     
     vol_ma5, vol_ma20 = vol.rolling(5).mean(), vol.rolling(20).mean()
     high_20 = high.rolling(20).max()
+
+    # ==========================================
+    # ⚔️ 技術分 (Technical Score) - 0分起跑
+    # ==========================================
+    t_score = 0
     
-    i = -1 
-    c_now, m20_now, r_now, v_now = close.iloc[i], ma20.iloc[i], rsi.iloc[i], vol.iloc[i]
-    if pd.isna(c_now) or c_now == 0: return None
+    # 1. 趨勢結構 (40分)
+    if c_now > m20_now: t_score += 10
+    if m20_now > ma20.iloc[i-1]: t_score += 10
+    if ma5.iloc[i] > m20_now > ma60.iloc[i]: t_score += 20
     
-    t_score = 60
-    if c_now > m20_now: t_score += 5
-    if m20_now > ma20.iloc[i-1]: t_score += 5
-    if ma5.iloc[i] > m20_now > ma60.iloc[i]: t_score += 10
-    if r_now > 50: t_score += 5
-    if r_now > 70: t_score += 5
-    if macd.iloc[i] > signal.iloc[i]: t_score += 5
-    if c_now > high_20.iloc[i-1]: t_score += 10
+    # 2. 關鍵突破 (30分)
+    if c_now >= high_20.iloc[i-1]: t_score += 30
     
-    v_score = 60
-    if v_now > vol_ma20.iloc[i]: v_score += 10
-    if v_now > vol_ma5.iloc[i]: v_score += 10
-    if c_now > open_p.iloc[i] and v_now > vol.iloc[i-1]: v_score += 15
-    if v_now > vol_ma20.iloc[i] * 1.5: v_score += 5
+    # 3. 動能指標 (30分)
+    if r_now > 55: t_score += 15
+    if macd.iloc[i] > signal.iloc[i]: t_score += 15
+
+    # ==========================================
+    # 🌊 量能分 (Volume Score) - 0分起跑
+    # ==========================================
+    v_score = 0
+    
+    # 1. 均量標準 (40分)
+    if v_now > vol_ma20.iloc[i]: v_score += 20
+    if v_now > vol_ma5.iloc[i]: v_score += 20
+    
+    # 2. 攻擊量能 (30分)
+    if v_now > vol_ma20.iloc[i] * 1.5: v_score += 30
+    
+    # 3. 價量關係 (30分)
+    if c_now > open_p.iloc[i] and v_now > vol.iloc[i-1]: v_score += 30
+    
+    # ==========================================
+    # 🏆 最終算分
+    # ==========================================
+    final_score = (min(100, t_score) * 0.7) + (min(100, v_score) * 0.3)
     
     return {
         '技術分': min(100, t_score), 
         '量能分': min(100, v_score), 
-        '攻擊分': (min(100, t_score) * 0.7) + (min(100, v_score) * 0.3), 
+        '攻擊分': final_score, 
         '收盤': c_now,
-        '20MA': m20_now 
+        '20MA': m20_now,
+        'ADX': adx_now,
+        '乖離率': bias_percentage
     }
 
 @st.cache_data(ttl=1800)
@@ -492,20 +575,23 @@ def save_holdings(df):
         repo.update_file(contents.path, f"Update {get_taiwan_time_iso()}", csv_content, contents.sha)
     except: pass
 
-# --- Tab 1 & 2 表格渲染 ---
+# --- Tab 1 & 2 表格渲染 (防呆修復版) ---
 def display_v32_tables(df, price_limit, suffix):
-    filtered = df[(df['收盤'] <= price_limit) & (df['攻擊分'] >= 86) & (df['攻擊分'] <= 92)].sort_values('攻擊分', ascending=False)
-    if filtered.empty: return st.warning("無符合標的")
+    # 篩選邏輯
+    filtered = df[(df['收盤'] <= price_limit) & (df['攻擊分'] >= 80)].sort_values('攻擊分', ascending=False)
+    
+    if filtered.empty: 
+        st.warning("目前無符合標準 (ADX>25 & 乖離<15%) 的高分標的，或是資料尚未更新。")
+        return
 
-    df_s_pre = filtered[(filtered['攻擊分'] >= 90) & (filtered['攻擊分'] <= 92)].head(10)
-    df_a_pre = filtered[(filtered['攻擊分'] >= 88) & (filtered['攻擊分'] < 90)].head(10)
-    df_b_pre = filtered[(filtered['攻擊分'] >= 86) & (filtered['攻擊分'] < 88)].head(10)
-    target_codes = pd.concat([df_s_pre, df_a_pre, df_b_pre])['代號'].tolist()
+    df_s_pre = filtered[(filtered['攻擊分'] >= 90)].head(10)
+    df_a_pre = filtered[(filtered['攻擊分'] >= 80) & (filtered['攻擊分'] < 90)].head(10)
+    target_codes = pd.concat([df_s_pre, df_a_pre])['代號'].tolist()
 
     # --- 功能按鈕區 ---
     c_scan, c_risk, c_update, c_info = st.columns([1, 1, 1, 1.5])
     
-    # 定義 Session State Key，確保不同頁面的資料不打架
+    # 定義 Session State Key
     chip_key = f"chip_data_{suffix}"
     risk_key = f"risk_data_{suffix}"
 
@@ -513,14 +599,14 @@ def display_v32_tables(df, price_limit, suffix):
     with c_scan:
         if st.button(f"🚀 籌碼掃描", key=f"scan_{suffix}"):
             chip_df = get_chip_analysis(target_codes)
-            st.session_state[chip_key] = chip_df # 存入 Session
+            st.session_state[chip_key] = chip_df 
 
     # 按鈕 2: 地雷檢測
     with c_risk:
         if st.button(f"💣 地雷檢測", key=f"risk_{suffix}"):
             with st.spinner("正在進行深度財報與質押掃描..."):
                 risk_df = get_risk_analysis_batch(target_codes)
-                st.session_state[risk_key] = risk_df # 存入 Session
+                st.session_state[risk_key] = risk_df 
 
     # 按鈕 3: 更新即時價
     with c_update:
@@ -548,44 +634,55 @@ def display_v32_tables(df, price_limit, suffix):
             tw_time = get_taiwan_time_str(st.session_state['last_update_time'])
             st.caption(f"🕒 更新: {tw_time}")
 
-    # --- 資料合併邏輯 (從 Session 讀取並合併，確保資料共存) ---
-    
-    # 1. 合併籌碼資料 (如果有的話)
+    # --- 資料合併邏輯 ---
     if chip_key in st.session_state:
         filtered = pd.merge(filtered, st.session_state[chip_key], on='代號', how='left')
 
-    # 2. 合併地雷資料 (如果有的話)
     if risk_key in st.session_state:
         filtered = pd.merge(filtered, st.session_state[risk_key], on='代號', how='left')
 
-    # 3. 合併即時報價
     saved_quotes = st.session_state.get('realtime_quotes', {})
     filtered['即時價'] = filtered['代號'].map(lambda x: saved_quotes.get(x, {}).get('即時價', np.nan))
     filtered['即時價'] = filtered['即時價'].fillna(filtered['收盤'])
 
-    # --- 表格顯示 ---
+    # --- 表格顯示 (關鍵防呆修改) ---
+    # 1. 先定義絕對存在的欄位
     base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
-    # 動態欄位檢查
+    
+    # 2. 動態檢查其他欄位是否存在，存在才加入，避免 KeyError
+    # 檢查 ADX 與 乖離率
+    if 'ADX' in filtered.columns: base_cols.append('ADX')
+    if '乖離率' in filtered.columns: base_cols.append('乖離率')
+    
+    # 檢查籌碼
     if '主力動向' in filtered.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
+    
+    # 檢查地雷
     if '地雷分' in filtered.columns: base_cols += ['地雷分', '風險細節']
 
-    fmt = {'即時價':'{:.2f}', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}', '地雷分':'{:.0f}'}
+    fmt = {
+        '即時價':'{:.2f}', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', 
+        '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}', '地雷分':'{:.0f}', 
+        'ADX':'{:.1f}', '乖離率':'{:.1f}%'
+    }
 
     for title, score_range in [
-        ("👑 S 級主力區 (90-92分)", (90, 92)),
-        ("🚀 A 級蓄勢區 (88-90分)", (88, 90)),
-        ("👀 B 級觀察區 (86-88分)", (86, 88))
+        ("👑 S 級主力區 (90分以上)", (90, 100)),
+        ("🚀 A 級蓄勢區 (80-90分)", (80, 90))
     ]:
         st.subheader(title)
         sub = filtered[(filtered['攻擊分'] >= score_range[0]) & (filtered['攻擊分'] <= score_range[1])].head(10)
+        
         if not sub.empty:
+            # 安全地建立表格
             st.dataframe(sub[base_cols].style.format(fmt)
-                         .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=86, vmax=92)
-                         .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=60, vmax=100)
-                         .background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=60, vmax=100)
+                         .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=80, vmax=100)
+                         .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=0, vmax=100)
+                         .background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=0, vmax=100)
                          .map(color_risk, subset=['地雷分'] if '地雷分' in sub.columns else []), 
                          hide_index=True, use_container_width=True)
-        else: st.caption("暫無標的")
+        else: 
+            st.caption("無符合標的 (若一直無資料，請清除快取)")
         st.divider()
 
 # --- 新增：個股搜尋專用顯示函式 ---
@@ -593,7 +690,7 @@ def display_single_stock_search(df, target_code):
     # 鎖定目標股票
     row = df[df['代號'] == target_code].copy()
     if row.empty:
-        st.warning(f"⚠️ 資料庫中找不到代號 {target_code}，或該股未符合 V32 篩選標準（如 KY、DR 股等）。")
+        st.warning(f"⚠️ 資料庫中找不到代號 {target_code}，或該股未符合 V32 篩選標準（如 KY、DR 股等），或已被 ADX/乖離率 濾網剔除。")
         return
 
     # 定義搜尋頁專用的 Session Key
@@ -636,24 +733,24 @@ def display_single_stock_search(df, target_code):
     row['即時價'] = row['即時價'].fillna(row['收盤'])
 
     # --- 表格顯示 (完全比照 S 級樣式) ---
-    base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
+    base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分', 'ADX', '乖離率']
     if '主力動向' in row.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
     if '地雷分' in row.columns: base_cols += ['地雷分', '風險細節']
 
-    fmt = {'即時價':'{:.2f}', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}', '地雷分':'{:.0f}'}
+    fmt = {'即時價':'{:.2f}', '攻擊分':'{:.1f}', '技術分':'{:.0f}', '量能分':'{:.0f}', '外資(張)': '{:,.0f}', '投信(張)': '{:,.0f}', '地雷分':'{:.0f}', 'ADX':'{:.1f}', '乖離率':'{:.1f}%'}
 
     st.markdown(f"### 🎯 {target_code} 分析結果")
     st.dataframe(row[base_cols].style.format(fmt)
-                 .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=60, vmax=100) # 搜尋頁不限分，故範圍拉寬
-                 .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=60, vmax=100)
-                 .background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=60, vmax=100)
+                 .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=0, vmax=100) # 搜尋頁不限分
+                 .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=0, vmax=100)
+                 .background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=0, vmax=100)
                  .map(color_risk, subset=['地雷分'] if '地雷分' in row.columns else [])
                  .map(color_action, subset=['主力動向'] if '主力動向' in row.columns else []), 
                  hide_index=True, use_container_width=True)
 
-# --- 主程式 (已修改 Tab 結構) ---
+# --- 主程式 (包含防呆修復與庫存顯示修復) ---
 def main():
-    st.title("⚔️ V32 戰情室 (Dual Core)")
+    st.title("⚔️ V32 戰情室 (Sniper Mode)")
     # --- 插入：大盤濾網顯示 ---
     market = get_market_status()
     if market:
@@ -675,18 +772,20 @@ def main():
     if 'last_update_time' not in st.session_state: st.session_state['last_update_time'] = 0
     
     with st.spinner("讀取核心資料..."):
+        # 這裡會讀取原始資料 raw_df，確保庫存名字不會消失
         v32_df, raw_df, err = process_data()
     
-    # --- 修改點：新增 tab_search ---
+    # --- 定義 Tabs (關鍵: 必須在這裡定義 tab_inv) ---
     tab_80, tab_50, tab_search, tab_inv = st.tabs(["💰 80元以下推薦", "🪙 50元以下推薦", "🔍 個股診斷", "💼 庫存管理"])
 
     with tab_80:
         if not v32_df.empty: display_v32_tables(v32_df.copy(), 80, "80")
+        else: st.warning("資料庫為空，或所有股票皆被 ADX/乖離率 濾網剔除。")
 
     with tab_50:
         if not v32_df.empty: display_v32_tables(v32_df.copy(), 50, "50")
+        else: st.warning("資料庫為空，或所有股票皆被 ADX/乖離率 濾網剔除。")
 
-    # --- 修改點：新增搜尋頁面邏輯 ---
     with tab_search:
         st.subheader("🔍 個股 V32 體檢室")
         c1, c2 = st.columns([1, 3])
@@ -734,12 +833,25 @@ def main():
                 tw_time = get_taiwan_time_str(st.session_state['last_update_time'])
                 st.caption(f"🕒 台灣時間最後更新: {tw_time}")
 
-        name_map = dict(zip(v32_df['代號'], v32_df['名稱'])) if not v32_df.empty else {}
-        score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
-        if '20MA' in v32_df.columns:
-            ma20_map = v32_df.set_index('代號')['20MA'].to_dict()
-        else:
-            ma20_map = {code: 0 for code in v32_df['代號']}
+        # --- 修正 1: 名稱對應改用 raw_df (確保被濾除的股票也有名字) ---
+        name_map = {}
+        if not raw_df.empty:
+             name_map = dict(zip(raw_df['Code'], raw_df['Name']))
+        
+        # --- 修正 2: 建立評分對應與濾網清單 ---
+        score_map = {}
+        ma20_map = {}
+        filtered_in_codes = [] # 有通過濾網的股票名單
+
+        if not v32_df.empty:
+            score_map = v32_df.set_index('代號')['攻擊分'].to_dict()
+            filtered_in_codes = v32_df['代號'].tolist()
+            
+            if '20MA' in v32_df.columns:
+                ma20_map = v32_df.set_index('代號')['20MA'].to_dict()
+            else:
+                if '代號' in v32_df.columns:
+                    ma20_map = {code: 0 for code in v32_df['代號']}
 
         c1, c2 = st.columns(2)
         with c1:
@@ -772,6 +884,43 @@ def main():
             save_holdings(inv)
             st.rerun()
 
+        # ==========================================
+        # ⚡ 快速操作區 (新功能)
+        # ==========================================
+        st.divider()
+        st.subheader("⚡ 快速操作區")
+        c1, c2 = st.columns(2)
+        
+        # 取得目前庫存代號列表
+        current_inv_codes = []
+        if not st.session_state['inventory'].empty:
+            current_inv_codes = st.session_state['inventory']['股票代號'].unique().tolist()
+
+        with c1:
+            st.markdown("##### 📉 個股清倉")
+            to_sell_all = st.multiselect("選擇要全數賣出的股票", options=current_inv_codes)
+            
+            if st.button("💥 執行個股清倉", type="primary", disabled=not to_sell_all):
+                inv = st.session_state['inventory'].copy()
+                # 排除選中的股票
+                inv = inv[~inv['股票代號'].isin(to_sell_all)]
+                st.session_state['inventory'] = inv
+                save_holdings(inv)
+                st.toast(f"已清空: {', '.join(to_sell_all)}", icon="💥")
+                time.sleep(1)
+                st.rerun()
+
+        with c2:
+            st.markdown("##### 🧨 重置帳戶")
+            st.warning("注意：此操作將刪除所有庫存紀錄")
+            if st.button("🗑️ 全部清空 (刪除所有庫存)", type="secondary"):
+                inv = pd.DataFrame(columns=["股票代號", "買入均價", "持有股數"])
+                st.session_state['inventory'] = inv
+                save_holdings(inv)
+                st.toast("已清空所有庫存！", icon="🗑️")
+                time.sleep(1)
+                st.rerun()
+
         st.divider()
         if not st.session_state['inventory'].empty:
             inv_df = st.session_state['inventory'].copy()
@@ -782,10 +931,11 @@ def main():
                 code = str(r['股票代號'])
                 curr = saved_quotes.get(code, {}).get('即時價', r['買入均價'])
                 
-                if (curr == 0 or curr == r['買入均價']) and not v32_df.empty:
-                      backup_price = v32_df[v32_df['代號']==code]['收盤'].values
-                      if len(backup_price) > 0:
-                          curr = backup_price[0]
+                # 嘗試取得收盤價當備援 (優先用 raw_df 找，因為 v32_df 可能沒有)
+                if (curr == 0 or curr == r['買入均價']) and not raw_df.empty:
+                      backup_data = raw_df[raw_df['Code']==code]
+                      if not backup_data.empty:
+                          curr = backup_data['ClosingPrice'].values[0]
 
                 buy_price = r['買入均價']
                 qty = r['持有股數']
@@ -796,13 +946,17 @@ def main():
                 sc = score_map.get(code, 0)
                 ma20 = ma20_map.get(code, 0)
                 
-                # --- 此處已修正為 75 分 ---
-                if curr < ma20:
+                # --- 修正 3: 狙擊手專用建議邏輯 ---
+                passed_filter = code in filtered_in_codes
+                
+                if curr < ma20 and ma20 > 0:
                     action = f"🔴 停損/清倉 (破月線 {ma20:.1f})"
-                elif sc >= 75:
+                elif not passed_filter:
+                    action = "⚠️ 趨勢不明/過熱 (濾網剔除)"
+                elif sc >= 60:
                     action = f"🟢 續抱 (攻擊分 {sc:.0f})"
                 else:
-                    action = f"🟡 停利/減碼 (攻擊分 {sc:.0f} < 75)"
+                    action = f"🟡 動能偏弱 (攻擊分 {sc:.0f})"
 
                 res.append({
                     '代號': code, '名稱': name_map.get(code, code), 
@@ -818,11 +972,24 @@ def main():
             c2.metric("總損益", f"${df_res['損益'].sum():,.0f}", delta=f"{df_res['損益'].sum():,.0f}")
             c3.metric("總市值", f"${(df_res['即時價']*(inv_df['持有股數'])).sum():,.0f}")
             
+            # 針對建議操作設定顏色
+            def color_sniper_action(val):
+                val_str = str(val)
+                if "🔴" in val_str:
+                    return 'color: #ffffff; background-color: #d32f2f; font-weight: bold; padding: 5px; border-radius: 5px;' # 紅底
+                elif "🟢" in val_str:
+                    return 'color: #ffffff; background-color: #2e7d32; font-weight: bold; padding: 5px; border-radius: 5px;' # 綠底
+                elif "⚠️" in val_str:
+                    return 'color: #000000; background-color: #e0e0e0; font-weight: bold; padding: 5px; border-radius: 5px;' # 灰底
+                elif "🟡" in val_str:
+                    return 'color: #000000; background-color: #ffeb3b; font-weight: bold; padding: 5px; border-radius: 5px;' # 黃底
+                return ''
+
             st.dataframe(
                 df_res[['代號', '名稱', '持有張數', '買入均價', '即時價', '攻擊分', '報酬率%', '損益', '建議操作']].style
                 .format({'買入均價':'{:.2f}', '即時價':'{:.2f}', '損益':'{:+,.0f}', '報酬率%':'{:+.2f}%', '攻擊分':'{:.1f}'})
                 .map(color_surplus, subset=['損益','報酬率%'])
-                .map(color_action, subset=['建議操作']), 
+                .map(color_sniper_action, subset=['建議操作']), 
                 use_container_width=True, hide_index=True
             )
         else: st.info("目前無庫存。")
