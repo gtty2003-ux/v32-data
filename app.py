@@ -6,12 +6,11 @@ import pytz
 import yfinance as yf
 from github import Github 
 import time
-from FinMind.data import DataLoader
-import twstock
+from twstock import Stock
 import matplotlib.colors as mcolors
 import io
 import requests
-# --- 新增：富果 API 套件 ---
+# --- 富果 API 套件 ---
 from fugle_marketdata import RestClient
 
 # --- 設定頁面資訊 ---
@@ -82,12 +81,7 @@ def color_risk(val):
         return 'color: #000000; background-color: #ffeb3b; font-weight: bold;' # 黃底 (警戒)
     return 'color: #1b5e20; font-weight: bold;' # 綠字 (安全)
 
-# ... (上面是 color_risk 函式)
-    return 'color: #1b5e20; font-weight: bold;' # 綠字 (安全)
-
-# ================= ✄ 這裡開始插入 =================
-
-# --- 新增：大盤濾網模組 ---
+# --- 大盤濾網模組 ---
 @st.cache_data(ttl=3600) # 大盤一小時更新一次即可
 def get_market_status():
     try:
@@ -150,12 +144,25 @@ def load_data_from_github():
     except Exception as e:
         return pd.DataFrame()
 
-# --- V32 運算邏輯 ---
+# --- V32 運算邏輯 (含 1000張 過濾) ---
 def calculate_v32_score(df_group):
     if len(df_group) < 60: return None 
     df = df_group.sort_values('Date').reset_index(drop=True)
     close, vol, high, open_p = df['ClosingPrice'], df['TradeVolume'], df['HighestPrice'], df['OpeningPrice']
     
+    # ================= ✄ 過濾邏輯 (1000張) =================
+    # 1000 張 = 1,000,000 股
+    TARGET_LOTS = 1000
+    MIN_VOLUME_THRESHOLD = TARGET_LOTS * 1000
+    
+    # 取得最近一日的成交量
+    latest_vol = vol.iloc[-1]
+    
+    # 若成交量低於 100萬股，直接去除
+    if latest_vol < MIN_VOLUME_THRESHOLD:
+        return None
+    # ======================================================
+
     ma5, ma20, ma60 = close.rolling(5).mean(), close.rolling(20).mean(), close.rolling(60).mean()
     delta = close.diff()
     gain, loss = (delta.where(delta > 0, 0)).rolling(14).mean(), (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -221,79 +228,60 @@ def process_data():
             results.append(res)
     return pd.DataFrame(results), raw_df, None
 
-# --- 強化的即時報價模組 (Fugle API - Secrets 版) ---
+# --- 即時報價模組 (Fugle API) ---
 def get_realtime_quotes_robust(code_list):
     realtime_data = {}
-    
-    # 1. 安全地從 Streamlit Secrets 讀取 API Key
     try:
         api_key = st.secrets["general"]["FUGLE_API_KEY"]
     except:
         st.error("❌ 尚未設定 Fugle API Key！請到 Streamlit 後台 Secrets 設定。")
         return {}
 
-    # 2. 建立連線
     try:
         client = RestClient(api_key=api_key)
     except Exception as e:
         st.error(f"Fugle 連線失敗: {e}")
         return {}
     
-    # 3. 執行批次抓取
     progress_bar = st.progress(0, text="🚀 富果引擎啟動中 (Fugle API)...")
     total = len(code_list)
     
     for idx, code in enumerate(code_list):
-        # 去除空白與副檔名 (例如 "2330.TW" -> "2330")
         clean_code = str(code).strip().split('.')[0]
-        
         try:
             stock = client.stock
-            # 使用 Fugle 抓取即時行情
             q = stock.intraday.quote(symbol=clean_code)
             
-            # 兼容 Fugle 不同版本的數據結構
             price = None
-            if 'closePrice' in q:
-                price = q['closePrice']
-            elif 'lastPrice' in q:
-                price = q['lastPrice']
-            elif 'avgPrice' in q:
-                price = q['avgPrice']
+            if 'closePrice' in q: price = q['closePrice']
+            elif 'lastPrice' in q: price = q['lastPrice']
+            elif 'avgPrice' in q: price = q['avgPrice']
                 
             if price:
                 realtime_data[clean_code] = {'即時價': float(price)}
-            
         except Exception as e:
-            # 這裡印出錯誤方便除錯，但介面上不顯示以免太亂
-            print(f"Fugle Quote Error {clean_code}: {e}")
             pass
             
-        # 更新進度條
         progress_bar.progress((idx + 1) / total)
     
     progress_bar.empty()
     return realtime_data
 
-# --- 地雷股分數計算 (新模組) ---
-@st.cache_data(ttl=86400) # 財報數據一天更新一次即可
+# --- 地雷股分數計算 ---
+@st.cache_data(ttl=86400)
 def calculate_risk_factors(code):
-    """計算四大地雷指標: 現金流、資產膨脹、償債能力、籌碼質押"""
     r1, r2, r3, r4 = 0, 0, 0, 0
     try:
-        # 1. Yahoo Finance (R1, R2, R3)
         stock = yf.Ticker(f"{code}.TW")
-        # 嘗試取得季度財報
         fin = stock.quarterly_financials
         bs = stock.quarterly_balance_sheet
         cf = stock.quarterly_cashflow
         
-        # 備援：若無季度則取年度
         if fin.empty: fin = stock.financials
         if bs.empty: bs = stock.balance_sheet
         if cf.empty: cf = stock.cashflow
         
-        # R1: 現金流品質
+        # R1: 現金流
         if not fin.empty and not cf.empty:
             try:
                 ni = fin.loc['Net Income'].iloc[0]
@@ -349,7 +337,7 @@ def calculate_risk_factors(code):
                 else: r3 = 20 * (1.5 - qr)
             except: pass
 
-        # R4: 籌碼壓力 (質押比)
+        # R4: 籌碼質押
         try:
             url = f"https://histock.tw/stock/large.aspx?no={code}"
             headers = {'User-Agent': 'Mozilla/5.0'}
@@ -362,7 +350,6 @@ def calculate_risk_factors(code):
                     val = str(df['質押比例'].iloc[0]).replace('%', '')
                     pledge_ratio = float(val)
                     break
-            
             r4 = min(30, pledge_ratio * 0.4)
         except: pass
 
@@ -374,7 +361,6 @@ def calculate_risk_factors(code):
         return 0, "無數據"
 
 def get_risk_analysis_batch(code_list):
-    """批次執行地雷檢測"""
     risk_data = {}
     progress_bar = st.progress(0)
     total = len(code_list)
@@ -388,32 +374,18 @@ def get_risk_analysis_batch(code_list):
     progress_bar.empty()
     return pd.DataFrame.from_dict(risk_data, orient='index').reset_index().rename(columns={'index': '代號'})
 
-# --- 籌碼分析 (HiStock 嗨投資版) ---
+# --- 籌碼分析 (HiStock) ---
 def get_chip_analysis(symbol_list):
     chip_data = []
     p_bar = st.progress(0, text="連線至 HiStock 資料庫...")
-    
-    # 偽裝 Header
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     total = len(symbol_list)
     for i, symbol in enumerate(symbol_list):
         p_bar.progress((i + 1) / total, text=f"分析中: {symbol}")
-        
         try:
-            # HiStock 的籌碼頁面網址
             url = f"https://histock.tw/stock/chips.aspx?no={symbol}"
-            
-            # 使用 requests 抓取
             r = requests.get(url, headers=headers, timeout=8)
-            
-            # pandas read_html 強大之處：直接把網頁表格轉成 DataFrame
-            # HiStock 的表格通常有 class='tb-stock'
             dfs = pd.read_html(io.StringIO(r.text))
-            
-            # 找到正確的表格 (通常是第一個或含有'日期'的)
             target_df = None
             for df in dfs:
                 if '日期' in df.columns and '外資' in df.columns:
@@ -421,27 +393,17 @@ def get_chip_analysis(symbol_list):
                     break
             
             if target_df is not None and not target_df.empty:
-                # 取最新一筆資料 (第一列或最後一列，視網站排序而定，HiStock 通常最新在上面)
-                # 我們檢查日期的排序，確保取到最新的
-                latest = target_df.iloc[0] # HiStock 第一行通常是最新日期
-                
-                # 處理數據 (去除逗號，轉數字)
+                latest = target_df.iloc[0] 
                 def clean_num(val):
-                    try:
-                        return int(str(val).replace(',', '').replace('+', ''))
-                    except:
-                        return 0
+                    try: return int(str(val).replace(',', '').replace('+', ''))
+                    except: return 0
                 
-                # HiStock 單位已經是「張」了，不需要除以 1000 (需觀察實際數據，有時是張，有時是股，通常表格標題會寫)
-                # 經查 HiStock 顯示的是「張數」
                 f_buy = clean_num(latest['外資'])
                 t_buy = clean_num(latest['投信'])
                 
-                # 3. 判斷動向 (邏輯維持原本)
                 status_str = ""
                 if t_buy > 0: status_str += "🔴 投信買 "
                 elif t_buy < 0: status_str += "🟢 投信賣 "
-                
                 if f_buy > 1000: status_str += "🔥 外資大買 "
                 elif f_buy < -1000: status_str += "🧊 外資倒貨 "
                 
@@ -452,21 +414,12 @@ def get_chip_analysis(symbol_list):
                 else: tag = "🟡 一般輪動"
                 
                 final_status = f"{tag} | {status_str}" if status_str else tag
-                
-                chip_data.append({
-                    '代號': symbol, 
-                    '投信(張)': t_buy, 
-                    '外資(張)': f_buy, 
-                    '主力動向': final_status
-                })
+                chip_data.append({'代號': symbol, '投信(張)': t_buy, '外資(張)': f_buy, '主力動向': final_status})
             else:
                 chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '🟡 無數據'})
 
         except Exception as e:
-            print(f"HiStock Error {symbol}: {e}")
             chip_data.append({'代號': symbol, '投信(張)': 0, '外資(張)': 0, '主力動向': '❌ Error'})
-        
-        # 禮貌性延遲
         time.sleep(1.0)
 
     p_bar.progress(100, text="分析完成")
@@ -492,37 +445,31 @@ def save_holdings(df):
         repo.update_file(contents.path, f"Update {get_taiwan_time_iso()}", csv_content, contents.sha)
     except: pass
 
-# --- Tab 1 & 2 表格渲染 ---
+# --- 表格顯示 ---
 def display_v32_tables(df, price_limit, suffix):
     filtered = df[(df['收盤'] <= price_limit) & (df['攻擊分'] >= 86) & (df['攻擊分'] <= 92)].sort_values('攻擊分', ascending=False)
-    if filtered.empty: return st.warning("無符合標的")
+    if filtered.empty: return st.warning("無符合標的 (或被成交量濾網過濾)")
 
     df_s_pre = filtered[(filtered['攻擊分'] >= 90) & (filtered['攻擊分'] <= 92)].head(10)
     df_a_pre = filtered[(filtered['攻擊分'] >= 88) & (filtered['攻擊分'] < 90)].head(10)
     df_b_pre = filtered[(filtered['攻擊分'] >= 86) & (filtered['攻擊分'] < 88)].head(10)
     target_codes = pd.concat([df_s_pre, df_a_pre, df_b_pre])['代號'].tolist()
 
-    # --- 功能按鈕區 ---
     c_scan, c_risk, c_update, c_info = st.columns([1, 1, 1, 1.5])
-    
-    # 定義 Session State Key，確保不同頁面的資料不打架
     chip_key = f"chip_data_{suffix}"
     risk_key = f"risk_data_{suffix}"
 
-    # 按鈕 1: 籌碼掃描
     with c_scan:
         if st.button(f"🚀 籌碼掃描", key=f"scan_{suffix}"):
             chip_df = get_chip_analysis(target_codes)
-            st.session_state[chip_key] = chip_df # 存入 Session
+            st.session_state[chip_key] = chip_df 
 
-    # 按鈕 2: 地雷檢測
     with c_risk:
         if st.button(f"💣 地雷檢測", key=f"risk_{suffix}"):
-            with st.spinner("正在進行深度財報與質押掃描..."):
+            with st.spinner("深度掃描中..."):
                 risk_df = get_risk_analysis_batch(target_codes)
-                st.session_state[risk_key] = risk_df # 存入 Session
+                st.session_state[risk_key] = risk_df 
 
-    # 按鈕 3: 更新即時價
     with c_update:
         now = time.time()
         time_diff = now - st.session_state.get('last_update_time', 0)
@@ -533,7 +480,7 @@ def display_v32_tables(df, price_limit, suffix):
             btn_disabled = True
             
         if st.button(btn_label, disabled=btn_disabled, key=f"update_{suffix}", type="primary"):
-            with st.spinner(f"🚀 同步 Top {len(target_codes)} 檔股價..."):
+            with st.spinner(f"同步股價..."):
                 fresh_quotes = get_realtime_quotes_robust(target_codes)
                 current_quotes = st.session_state.get('realtime_quotes', {})
                 current_quotes.update(fresh_quotes)
@@ -548,24 +495,16 @@ def display_v32_tables(df, price_limit, suffix):
             tw_time = get_taiwan_time_str(st.session_state['last_update_time'])
             st.caption(f"🕒 更新: {tw_time}")
 
-    # --- 資料合併邏輯 (從 Session 讀取並合併，確保資料共存) ---
-    
-    # 1. 合併籌碼資料 (如果有的話)
     if chip_key in st.session_state:
         filtered = pd.merge(filtered, st.session_state[chip_key], on='代號', how='left')
-
-    # 2. 合併地雷資料 (如果有的話)
     if risk_key in st.session_state:
         filtered = pd.merge(filtered, st.session_state[risk_key], on='代號', how='left')
 
-    # 3. 合併即時報價
     saved_quotes = st.session_state.get('realtime_quotes', {})
     filtered['即時價'] = filtered['代號'].map(lambda x: saved_quotes.get(x, {}).get('即時價', np.nan))
     filtered['即時價'] = filtered['即時價'].fillna(filtered['收盤'])
 
-    # --- 表格顯示 ---
     base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
-    # 動態欄位檢查
     if '主力動向' in filtered.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
     if '地雷分' in filtered.columns: base_cols += ['地雷分', '風險細節']
 
@@ -588,54 +527,36 @@ def display_v32_tables(df, price_limit, suffix):
         else: st.caption("暫無標的")
         st.divider()
 
-# --- 新增：個股搜尋專用顯示函式 ---
 def display_single_stock_search(df, target_code):
-    # 鎖定目標股票
     row = df[df['代號'] == target_code].copy()
     if row.empty:
-        st.warning(f"⚠️ 資料庫中找不到代號 {target_code}，或該股未符合 V32 篩選標準（如 KY、DR 股等）。")
+        st.warning(f"⚠️ 找不到代號 {target_code}，或該股不符合 V32 篩選 (例如成交量 < 1000張)。")
         return
 
-    # 定義搜尋頁專用的 Session Key
     search_key_chip = f"search_chip_{target_code}"
     search_key_risk = f"search_risk_{target_code}"
-    search_key_quote = f"search_quote_{target_code}"
 
-    # --- 操作按鈕區 ---
     col_input, col_btn = st.columns([3, 2])
     with col_btn:
-        # 單一按鈕觸發全部分析 (優化體驗)
-        if st.button("🔎 立即詳細診斷 (籌碼/地雷/即時)", key=f"btn_search_{target_code}", type="primary"):
-            with st.spinner(f"正在深度分析 {target_code} ..."):
-                # 1. 抓即時價
+        if st.button("🔎 立即詳細診斷", key=f"btn_search_{target_code}", type="primary"):
+            with st.spinner(f"深度分析 {target_code} ..."):
                 q = get_realtime_quotes_robust([target_code])
-                st.session_state['realtime_quotes'].update(q) # 更新全域報價
-                
-                # 2. 抓籌碼
+                st.session_state['realtime_quotes'].update(q)
                 c = get_chip_analysis([target_code])
                 st.session_state[search_key_chip] = c
-                
-                # 3. 抓地雷
                 r = get_risk_analysis_batch([target_code])
                 st.session_state[search_key_risk] = r
-                
                 st.rerun()
 
-    # --- 資料合併 ---
-    # 1. 合併籌碼
     if search_key_chip in st.session_state:
         row = pd.merge(row, st.session_state[search_key_chip], on='代號', how='left')
-    
-    # 2. 合併地雷
     if search_key_risk in st.session_state:
         row = pd.merge(row, st.session_state[search_key_risk], on='代號', how='left')
         
-    # 3. 合併即時價 (從全域 Session 抓)
     saved_quotes = st.session_state.get('realtime_quotes', {})
     row['即時價'] = saved_quotes.get(target_code, {}).get('即時價', np.nan)
     row['即時價'] = row['即時價'].fillna(row['收盤'])
 
-    # --- 表格顯示 (完全比照 S 級樣式) ---
     base_cols = ['代號','名稱','即時價','技術分','量能分','攻擊分']
     if '主力動向' in row.columns: base_cols += ['主力動向', '投信(張)', '外資(張)']
     if '地雷分' in row.columns: base_cols += ['地雷分', '風險細節']
@@ -644,17 +565,17 @@ def display_single_stock_search(df, target_code):
 
     st.markdown(f"### 🎯 {target_code} 分析結果")
     st.dataframe(row[base_cols].style.format(fmt)
-                 .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=60, vmax=100) # 搜尋頁不限分，故範圍拉寬
+                 .background_gradient(subset=['攻擊分'], cmap=cmap_pastel_red, vmin=60, vmax=100)
                  .background_gradient(subset=['技術分'], cmap=cmap_pastel_blue, vmin=60, vmax=100)
                  .background_gradient(subset=['量能分'], cmap=cmap_pastel_green, vmin=60, vmax=100)
                  .map(color_risk, subset=['地雷分'] if '地雷分' in row.columns else [])
                  .map(color_action, subset=['主力動向'] if '主力動向' in row.columns else []), 
                  hide_index=True, use_container_width=True)
 
-# --- 主程式 (已修改 Tab 結構) ---
+# --- 主程式 ---
 def main():
     st.title("⚔️ V32 戰情室 (Dual Core)")
-    # --- 插入：大盤濾網顯示 ---
+    
     market = get_market_status()
     if market:
         c1, c2, c3 = st.columns([2, 1, 1])
@@ -663,21 +584,17 @@ def main():
                  st.error(f"{market['signal']} **大盤濾網：{market['status']}**")
             else:
                  st.info(f"{market['signal']} **大盤濾網：{market['status']}**")
-        with c2:
-            st.metric("加權指數", f"{market['price']:,.0f}", f"{market['gap']:.2f}% (距季線)")
-        with c3:
-            st.metric("季線 (60MA)", f"{market['ma60']:,.0f}")
-            
-        st.divider() # 畫一條線區隔
+        with c2: st.metric("加權指數", f"{market['price']:,.0f}", f"{market['gap']:.2f}% (距季線)")
+        with c3: st.metric("季線 (60MA)", f"{market['ma60']:,.0f}")
+        st.divider()
+
     if 'inventory' not in st.session_state: st.session_state['inventory'] = load_holdings()
-    
     if 'realtime_quotes' not in st.session_state: st.session_state['realtime_quotes'] = {}
     if 'last_update_time' not in st.session_state: st.session_state['last_update_time'] = 0
     
     with st.spinner("讀取核心資料..."):
         v32_df, raw_df, err = process_data()
     
-    # --- 修改點：新增 tab_search ---
     tab_80, tab_50, tab_search, tab_inv = st.tabs(["💰 80元以下推薦", "🪙 50元以下推薦", "🔍 個股診斷", "💼 庫存管理"])
 
     with tab_80:
@@ -686,30 +603,23 @@ def main():
     with tab_50:
         if not v32_df.empty: display_v32_tables(v32_df.copy(), 50, "50")
 
-    # --- 修改點：新增搜尋頁面邏輯 ---
     with tab_search:
         st.subheader("🔍 個股 V32 體檢室")
         c1, c2 = st.columns([1, 3])
-        with c1:
-            search_input = st.text_input("輸入股票代號", placeholder="例如: 2330", max_chars=4)
-        
+        with c1: search_input = st.text_input("輸入股票代號", placeholder="例如: 2330", max_chars=4)
         if search_input:
             clean_code = search_input.strip()
-            if not v32_df.empty:
-                display_single_stock_search(v32_df.copy(), clean_code)
-            else:
-                st.error("資料尚未載入")
+            if not v32_df.empty: display_single_stock_search(v32_df.copy(), clean_code)
+            else: st.error("資料尚未載入")
 
     with tab_inv:
         st.subheader("📝 庫存交易管理")
-        
         col_btn, col_info = st.columns([1, 4])
         with col_btn:
             now = time.time()
             time_diff = now - st.session_state.get('last_update_time', 0)
             btn_label = "🔄 更新即時股價"
             btn_disabled = False
-            
             if time_diff < 60:
                 btn_label = f"⏳ 冷卻中 ({int(60 - time_diff)}s)"
                 btn_disabled = True
@@ -719,12 +629,10 @@ def main():
                     with st.spinner("🚀 同步庫存股價..."):
                         codes = st.session_state['inventory']['股票代號'].tolist()
                         fresh_quotes = get_realtime_quotes_robust(codes)
-                        
                         current_quotes = st.session_state.get('realtime_quotes', {})
                         current_quotes.update(fresh_quotes)
                         st.session_state['realtime_quotes'] = current_quotes
                         st.session_state['last_update_time'] = time.time()
-                        
                         st.toast(f"✅ 更新成功！", icon="💼")
                         time.sleep(1)
                         st.rerun()
@@ -736,10 +644,8 @@ def main():
 
         name_map = dict(zip(v32_df['代號'], v32_df['名稱'])) if not v32_df.empty else {}
         score_map = v32_df.set_index('代號')['攻擊分'].to_dict() if not v32_df.empty else {}
-        if '20MA' in v32_df.columns:
-            ma20_map = v32_df.set_index('代號')['20MA'].to_dict()
-        else:
-            ma20_map = {code: 0 for code in v32_df['代號']}
+        if '20MA' in v32_df.columns: ma20_map = v32_df.set_index('代號')['20MA'].to_dict()
+        else: ma20_map = {code: 0 for code in v32_df['代號']}
 
         c1, c2 = st.columns(2)
         with c1:
@@ -781,28 +687,20 @@ def main():
             for _, r in inv_df.iterrows():
                 code = str(r['股票代號'])
                 curr = saved_quotes.get(code, {}).get('即時價', r['買入均價'])
-                
                 if (curr == 0 or curr == r['買入均價']) and not v32_df.empty:
                       backup_price = v32_df[v32_df['代號']==code]['收盤'].values
-                      if len(backup_price) > 0:
-                          curr = backup_price[0]
+                      if len(backup_price) > 0: curr = backup_price[0]
 
                 buy_price = r['買入均價']
                 qty = r['持有股數']
-                
                 pl = (curr - buy_price) * qty
                 roi = (pl / (buy_price * qty) * 100) if buy_price > 0 else 0
-                
                 sc = score_map.get(code, 0)
                 ma20 = ma20_map.get(code, 0)
                 
-                # --- 此處已修正為 75 分 ---
-                if curr < ma20:
-                    action = f"🔴 停損/清倉 (破月線 {ma20:.1f})"
-                elif sc >= 75:
-                    action = f"🟢 續抱 (攻擊分 {sc:.0f})"
-                else:
-                    action = f"🟡 停利/減碼 (攻擊分 {sc:.0f} < 75)"
+                if curr < ma20: action = f"🔴 停損/清倉 (破月線 {ma20:.1f})"
+                elif sc >= 75: action = f"🟢 續抱 (攻擊分 {sc:.0f})"
+                else: action = f"🟡 停利/減碼 (攻擊分 {sc:.0f} < 75)"
 
                 res.append({
                     '代號': code, '名稱': name_map.get(code, code), 
