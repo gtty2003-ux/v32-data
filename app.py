@@ -11,100 +11,110 @@ import io
 # --- 設定頁面資訊 ---
 st.set_page_config(page_title="V32 真實收益戰情室", layout="wide", page_icon="💰")
 
-# --- 全域變數 (對接你現有的 Repo) ---
+# --- 全域變數 ---
 DATA_REPO = "gtty2003-ux/v32-auto-updater" 
 DATA_FILE = "v32_dataset.csv"
 HOLDING_REPO = "gtty2003-ux/v32-data"
 HOLDINGS_FILE = "holdings.csv"
 
-# --- 樣式與工具函數 ---
-def get_taiwan_time_str():
-    return datetime.now(pytz.timezone('Asia/Taipei')).strftime("%Y-%m-%d %H:%M:%S")
+# --- 樣式設定 ---
+st.markdown("""
+    <style>
+    div[data-testid="stMetricValue"] {font-size: 24px; font-weight: bold;}
+    .stButton>button {width: 100%; border-radius: 5px; font-weight: bold;}
+    </style>
+    """, unsafe_allow_html=True)
 
 def color_surplus(val):
     if not isinstance(val, (int, float)): return ''
     return 'color: #d32f2f; font-weight: bold;' if val > 0 else ('color: #388e3c; font-weight: bold;' if val < 0 else 'color: black')
 
-# --- 核心資料讀寫 (GitHub) ---
-@st.cache_data(ttl=1800) # 每 30 分鐘快取一次爬蟲數據
+# --- 核心資料讀取 (GitHub) ---
+@st.cache_data(ttl=600)
 def load_v32_crawler_data():
-    """讀取 V32 爬蟲系統的收盤價數據"""
+    """讀取 V32 爬蟲系統，並建立強健的價格字典"""
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
         url = f"https://api.github.com/repos/{DATA_REPO}/contents/{DATA_FILE}"
         headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3.raw"}
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            df = pd.read_csv(io.StringIO(response.text))
-            # 關鍵修正 1：強制代號為字串，並補齊 4 碼 (讓 56 變回 0056)
-            df['Code'] = df['Code'].astype(str).str.strip().str.zfill(4)
+            # 讀取時就強制 Code 為字串
+            df = pd.read_csv(io.StringIO(response.text), dtype={'Code': str})
+            
+            # 處理代號：補0並去掉 .TW 或 .TWO 尾綴
+            df['Code'] = df['Code'].str.split('.').str[0].str.zfill(4)
             return df[['Code', 'ClosingPrice']].set_index('Code')['ClosingPrice'].to_dict()
         return {}
-    except Exception as e:
+    except:
         return {}
 
 def load_holdings():
-    """讀取你的庫存資料，並進行防呆處理"""
+    """讀取庫存，強制維持代號格式"""
     try:
         g = Github(st.secrets["general"]["GITHUB_TOKEN"])
-        df = pd.read_csv(g.get_repo(HOLDING_REPO).get_contents(HOLDINGS_FILE).download_url)
+        # 使用 dtype 參數強制讀取為字串，防止 0056 變成 56
+        df = pd.read_csv(g.get_repo(HOLDING_REPO).get_contents(HOLDINGS_FILE).download_url, dtype={'股票代號': str})
         
-        # 關鍵修正 2：確保庫存代號也是 4 碼字串
-        df['股票代號'] = df['股票代號'].astype(str).str.strip().str.zfill(4)
+        # 二次補強：確保補滿 4 碼
+        df['股票代號'] = df['股票代號'].str.strip().str.zfill(4)
         
-        # 關鍵修正 3：處理空值 (None / NaN)，強制轉為 0，避免運算崩潰
-        if '累積配息' not in df.columns: 
-            df['累積配息'] = 0.0
-        
+        # 數值防呆
+        if '累積配息' not in df.columns: df['累積配息'] = 0.0
         df['累積配息'] = pd.to_numeric(df['累積配息'], errors='coerce').fillna(0.0)
         df['買入均價'] = pd.to_numeric(df['買入均價'], errors='coerce').fillna(0.0)
         df['持有股數'] = pd.to_numeric(df['持有股數'], errors='coerce').fillna(0.0)
         
         return df[['股票代號', '買入均價', '持有股數', '累積配息']]
-    except Exception as e:
+    except: 
         return pd.DataFrame(columns=["股票代號", "買入均價", "持有股數", "累積配息"])
 
 def save_holdings(df):
-    """將庫存存回 GitHub"""
     try:
         g = Github(st.secrets["general"]["GITHUB_TOKEN"])
         repo = g.get_repo(HOLDING_REPO)
         contents = repo.get_contents(HOLDINGS_FILE)
-        repo.update_file(contents.path, f"V32 Sync {get_taiwan_time_str()}", df.to_csv(index=False), contents.sha)
-        st.toast("✅ 資料已同步至雲端", icon="☁️")
-    except Exception as e:
-        st.error(f"儲存失敗: {e}")
+        # 存檔時確保格式
+        df['股票代號'] = df['股票代號'].astype(str).str.zfill(4)
+        repo.update_file(contents.path, f"Sync {datetime.now().strftime('%H:%M:%S')}", df.to_csv(index=False), contents.sha)
+        st.toast("✅ 資料已同步", icon="☁️")
+    except:
+        st.error("儲存失敗")
 
 # --- 主程式 ---
 def main():
-    st.title("💰 V32 真實收益戰情室")
+    st.title("💰 V32 真實收益儀表板")
     
-    # 初始化 Session State
-    if 'inventory' not in st.session_state: 
-        st.session_state['inventory'] = load_holdings()
-    
-    # 載入爬蟲價格 (背景自動抓取你的 v32_dataset.csv)
+    # 每次跑程式都重刷資料庫與庫存
     crawler_prices = load_v32_crawler_data()
+    inv = load_holdings()
 
-    # --- 第一區：資產總覽 ---
-    inv = st.session_state['inventory'].copy()
     if not inv.empty:
         res = []
         for _, r in inv.iterrows():
             code = r['股票代號']
-            # 使用爬蟲數據，若無則暫時顯示買入均價
-            curr = crawler_prices.get(code, r['買入均價']) 
+            # 查找價格字典
+            curr = crawler_prices.get(code)
+            
+            # 如果爬蟲沒抓到，嘗試在字典裡找去 0 版 (預防爬蟲資料沒補0)
+            if curr is None:
+                curr = crawler_prices.get(str(int(code))) if code.isdigit() else None
+            
+            # 最終還是沒抓到，才用均價 (並加上警告符號)
+            price_display = curr if curr is not None else r['買入均價']
+            status_symbol = "✅" if curr is not None else "⚠️"
             
             total_cost = r['買入均價'] * r['持有股數']
-            market_val = curr * r['持有股數']
+            market_val = price_display * r['持有股數']
             unrealized_pl = market_val - total_cost
             true_pl = unrealized_pl + r['累積配息']
             
             res.append({
                 '代號': code, 
+                '狀態': status_symbol,
                 '持有股數': int(r['持有股數']), 
                 '買入均價': r['買入均價'],
-                '最新收盤價': curr, 
+                '最新市價': price_display, 
                 '累積配息': r['累積配息'], 
                 '真實總損益': true_pl,
                 '真實報酬率%': (true_pl / total_cost * 100) if total_cost > 0 else 0
@@ -112,99 +122,71 @@ def main():
         
         df_res = pd.DataFrame(res)
         
-        # 顯示頂部數據卡
+        # 總計欄位
         c1, c2, c3 = st.columns(3)
-        total_cost_sum = df_res['買入均價'].mul(df_res['持有股數']).sum()
-        total_pl_sum = df_res['真實總損益'].sum()
-        
-        c1.metric("投入總成本", f"${total_cost_sum:,.0f}")
+        cost_sum = (df_res['買入均價'] * df_res['持有股數']).sum()
+        pl_sum = df_res['真實總損益'].sum()
+        c1.metric("總投入成本", f"${cost_sum:,.0f}")
         c2.metric("累積總配息", f"${df_res['累積配息'].sum():,.0f}")
-        c3.metric("總真實損益", f"${total_pl_sum:,.0f}", 
-                  delta=f"{(total_pl_sum / (total_cost_sum or 1) * 100):.2f}%")
+        c3.metric("總體真實報酬", f"${pl_sum:,.0f}", delta=f"{(pl_sum/cost_sum*100):.2f}%" if cost_sum > 0 else "0%")
 
-        # 顯示主要表格
+        # 表格顯示 (關鍵：使用 column_config 鎖定文字型態)
         st.dataframe(
             df_res.style.format({
-                '買入均價':'{:.2f}', 
-                '最新收盤價':'{:.2f}', 
-                '累積配息':'{:,.0f}',
-                '真實總損益':'{:+,.0f}', 
-                '真實報酬率%':'{:+.2f}%'
-            }).map(color_surplus, subset=['真實總損益', '真實報酬率%']), 
+                '買入均價':'{:.2f}', '最新市價':'{:.2f}', 
+                '累積配息':'{:,.0f}', '真實總損益':'{:+,.0f}', '真實報酬率%':'{:+.2f}%'
+            }).map(color_surplus, subset=['真實總損益', '真實報酬率%']),
+            column_config={
+                "代號": st.column_config.TextColumn("代號"), # 強制為文字，防止去0
+            },
             use_container_width=True, 
             hide_index=True
         )
-    else:
-        st.info("目前無庫存資料，請在下方新增。")
-
+        if "⚠️" in df_res['狀態'].values:
+            st.caption("⚠️ 表示爬蟲資料庫中找不到該代號的最新價格，暫時以均價計算。")
+    
     st.divider()
 
-    # --- 第二區：動作計算機 ---
-    st.subheader("🛠️ 庫存異動與領息登記")
-    with st.expander("點擊展開：加碼買入 / 領取配息小工具", expanded=True):
-        col_sel, col_act, col_p, col_q = st.columns([1, 1, 1, 1])
-        
-        exist_codes = inv['股票代號'].tolist() if not inv.empty else []
-        target = col_sel.selectbox("選擇股票", options=["+ 新增標的"] + exist_codes)
-        action = col_act.selectbox("執行動作", options=["加碼買入", "登記領息", "手動校正"])
+    # --- 加碼/領息小工具 ---
+    st.subheader("🛠️ 數據更新工具")
+    with st.expander("執行買入或領息登記", expanded=True):
+        c_sel, c_act, c_p, c_q = st.columns(4)
+        target = c_sel.selectbox("選擇股票", options=["+ 新增標的"] + (inv['股票代號'].tolist() if not inv.empty else []))
+        action = c_act.selectbox("動作", options=["加碼買入", "登記領息", "手動校正"])
         
         if target == "+ 新增標的":
-            new_code = st.text_input("輸入新股票代號 (如: 00919)")
-            current_target = new_code.strip().zfill(4) if new_code else ""
+            t_code = st.text_input("輸入代號").strip().zfill(4)
         else:
-            current_target = target
+            t_code = target
 
-        if action == "加碼買入":
-            price = col_p.number_input("買入單價", min_value=0.0, step=0.01)
-            qty = col_q.number_input("買入股數", min_value=0, step=1000)
-        elif action == "登記領息":
-            div_amt = col_p.number_input("本次領息總額", min_value=0.0, step=1.0)
-            st.caption("※ 系統會直接累加至『累積配息』欄位")
-        else:
-            price = col_p.number_input("校正均價", min_value=0.0, step=0.01)
-            qty = col_q.number_input("校正總股數", min_value=0, step=1)
+        p_val = c_p.number_input("價格 / 總配息金額", min_value=0.0, step=0.01)
+        q_val = c_q.number_input("股數變動", min_value=0, step=100)
 
-        if st.button("🔥 執行並更新狀態", type="primary"):
-            if not current_target:
-                st.error("請輸入或選擇股票代號！")
+        if st.button("💾 確認更新", type="primary"):
+            if not t_code or t_code == "0000":
+                st.error("請輸入正確代號")
                 return
 
-            temp_inv = st.session_state['inventory'].copy()
+            new_inv = inv.copy()
+            match = new_inv[new_inv['股票代號'] == t_code]
             
-            # 抓取舊有數據，確保無 None 值
-            match = temp_inv[temp_inv['股票代號'] == current_target]
-            old_q = float(match['持有股數'].values[0]) if not match.empty else 0.0
-            old_p = float(match['買入均價'].values[0]) if not match.empty else 0.0
-            old_d = float(match['累積配息'].values[0]) if not match.empty else 0.0
-            
+            old_p = match['買入均價'].values[0] if not match.empty else 0.0
+            old_q = match['持有股數'].values[0] if not match.empty else 0.0
+            old_d = match['累積配息'].values[0] if not match.empty else 0.0
+
             if action == "加碼買入":
-                new_total_q = old_q + qty
-                new_avg_p = ((old_p * old_q) + (price * qty)) / new_total_q if new_total_q > 0 else 0
-                new_row = {'股票代號': current_target, '買入均價': round(new_avg_p, 2), '持有股數': new_total_q, '累積配息': old_d}
+                new_q = old_q + q_val
+                new_p = ((old_p * old_q) + (p_val * q_val)) / new_q if new_q > 0 else 0
+                row = {'股票代號': t_code, '買入均價': round(new_p, 2), '持有股數': new_q, '累積配息': old_d}
             elif action == "登記領息":
-                new_row = {'股票代號': current_target, '買入均價': old_p, '持有股數': old_q, '累積配息': old_d + div_amt}
-            else: # 手動校正
-                new_row = {'股票代號': current_target, '買入均價': price, '持有股數': qty, '累積配息': old_d}
+                row = {'股票代號': t_code, '買入均價': old_p, '持有股數': old_q, '累積配息': old_d + p_val}
+            else:
+                row = {'股票代號': t_code, '買入均價': p_val, '持有股數': q_val, '累積配息': old_d}
 
-            # 移除舊列，新增更新後的列
-            temp_inv = temp_inv[temp_inv['股票代號'] != current_target]
-            temp_inv = pd.concat([temp_inv, pd.DataFrame([new_row])], ignore_index=True)
-            
-            # 更新並儲存
-            st.session_state['inventory'] = temp_inv
-            save_holdings(temp_inv)
-            st.success(f"✅ {current_target} 狀態更新成功！")
-            time.sleep(1)
-            
-            # 清除 cache 以便抓取最新資料 (如果需要)
+            new_inv = new_inv[new_inv['股票代號'] != t_code]
+            new_inv = pd.concat([new_inv, pd.DataFrame([row])], ignore_index=True)
+            save_holdings(new_inv)
             st.rerun()
-
-    # --- 第三區：強制刷新 ---
-    st.divider()
-    if st.button("🔄 重新載入爬蟲數據庫"):
-        load_v32_crawler_data.clear() # 清除快取，強制重拉 GitHub 爬蟲資料
-        st.session_state['inventory'] = load_holdings() # 重讀庫存
-        st.rerun()
 
 if __name__ == "__main__":
     main()
