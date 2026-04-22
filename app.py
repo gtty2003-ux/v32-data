@@ -99,12 +99,17 @@ def main():
             })
         
         df_res = pd.DataFrame(res)
-        c1, c2, c3 = st.columns(3)
+        
+        # --- 選擇一：四聯排 ---
+        c1, c2, c3, c4 = st.columns(4)
         cost_sum = (df_res['買入均價'] * df_res['持有股數']).sum()
+        market_sum = (df_res['最新市價'] * df_res['持有股數']).sum() # 新增總市值計算
         pl_sum = df_res['真實總損益'].sum()
+        
         c1.metric("總投入成本", f"${cost_sum:,.0f}")
-        c2.metric("累積總配息", f"${df_res['累積配息'].sum():,.0f}")
-        c3.metric("總體真實報酬", f"${pl_sum:,.0f}", delta=f"{(pl_sum/cost_sum*100):.2f}%" if cost_sum > 0 else "0%")
+        c2.metric("目前總市值", f"${market_sum:,.0f}", delta=f"帳面價差 {(market_sum - cost_sum):+,.0f} 元")
+        c3.metric("累積總配息", f"${df_res['累積配息'].sum():,.0f}")
+        c4.metric("總體真實報酬", f"${pl_sum:,.0f}", delta=f"{(pl_sum/cost_sum*100):.2f}%" if cost_sum > 0 else "0%")
 
         st.dataframe(
             df_res.style.format({
